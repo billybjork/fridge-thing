@@ -1,5 +1,5 @@
 #include "Inkplate.h"
-#include <SdFat.h>  // The SD library typically used by Inkplate
+#include <SdFat.h> 
 
 // Create an Inkplate object.
 Inkplate display;
@@ -12,7 +12,7 @@ SdFile root;
 SdFile currentFile;
 
 // Delay between images (in minutes)
-const int DELAY_MINUTES = 1;
+const int DELAY_MINUTES = 5;
 
 // Threshold for “low battery” warning (%)
 const float BATTERY_WARN_PERCENT = 5.0;
