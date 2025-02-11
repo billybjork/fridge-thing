@@ -21,7 +21,7 @@ AsyncWebServer server(80);
 DNSServer dnsServer;
 
 // Access Point settings.
-const char *apSSID = "Inkplate_Setup";
+const char *apSSID = "BjorkFrame_Setup";
 const char *apPassword = "";  // Open network
 
 // HTML content for the Wi-Fi setup page with improved styling.
@@ -30,7 +30,7 @@ const char *htmlSetupPage = R"rawliteral(
 <html>
   <head>
     <meta charset="UTF-8">
-    <title>Wi-Fi Setup</title>
+    <title>Bjork Frame - Wi-Fi Setup</title>
     <style>
       body {
         font-family: Arial, sans-serif;
@@ -61,7 +61,7 @@ const char *htmlSetupPage = R"rawliteral(
   <body>
     <h2>Enter Wi-Fi Details</h2>
     <form action="/setup" method="post">
-      <input type="text" name="ssid" placeholder="Wi-Fi SSID"><br>
+      <input type="text" name="ssid" placeholder="Wi-Fi Name"><br>
       <input type="password" name="password" placeholder="Wi-Fi Password"><br>
       <input type="submit" value="Save">
     </form>
@@ -90,18 +90,19 @@ void setup() {
   Serial.begin(115200);
 
   // For testing: clear stored credentials to force captive portal mode.
-  preferences.begin("wifi", false);
-  preferences.clear();      // Clear all stored key/value pairs.
-  preferences.end();
-  preferences.begin("wifi", false);
+  // Comment out all lines for production
+  // preferences.begin("wifi", false);
+  // preferences.clear();      // Clear all stored key/value pairs.
+  // preferences.end();
+  // preferences.begin("wifi", false);
   
   // Initialize the Inkplate display.
   display.begin();
   display.clearDisplay();
   display.setTextColor(BLACK);
-  display.setTextSize(2);
+  display.setTextSize(4);
   display.setCursor(10, 20);
-  display.print("Starting Inkplate...");
+  display.print("Booting up...");
   display.display();
 
   // Load stored Wi‑Fi credentials.
@@ -168,18 +169,16 @@ void startCaptivePortal() {
   // Update the display with instructions for the user.
   display.clearDisplay();
   display.setTextColor(BLACK);
-  display.setTextSize(2);
+  display.setTextSize(5);
   display.setCursor(10, 10);
-  display.print("Network Setup Mode");
-  display.setTextSize(1);
-  display.setCursor(10, 40);
-  display.print("Connect to 'Inkplate_Setup'");
-  display.setCursor(10, 60);
-  display.print("then visit:");
+  display.print("Wi-Fi Setup");
+  display.setTextSize(2);
   display.setCursor(10, 80);
+  display.print("Connect to the network 'BjorkFrame_Setup'");
+  display.setCursor(10, 110);
+  display.print("then visit:");
+  display.setCursor(10, 130);
   display.print("http://setup.local/");
-  display.setCursor(10, 100);
-  display.print("Waiting for connection...");
   display.display();
 
   // Start a DNS server to redirect all requests to the Inkplate’s IP.
