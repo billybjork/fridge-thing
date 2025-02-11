@@ -12,7 +12,7 @@ SdFile root;
 SdFile currentFile;
 
 // Delay between images (in minutes)
-const int DELAY_MINUTES = 5;
+const int DELAY_MINUTES = 60;
 
 // Threshold for “low battery” warning (%)
 const float BATTERY_WARN_PERCENT = 5.0;
