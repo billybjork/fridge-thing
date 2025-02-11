@@ -1,6 +1,4 @@
 // --- WORKAROUND DEFINES ---
-// Prevent global definitions from the FS library (avoiding conflicts)
-// and disable SD support for Inkplate (since we don't need it for this test).
 #define FS_NO_GLOBALS
 #define INKPLATE_NO_SD
 
@@ -11,6 +9,7 @@
 #include <DNSServer.h>
 #include <ESPmDNS.h>
 #include <Inkplate.h>               // With INKPLATE_NO_SD defined, this skips SD code
+#include <esp_sleep.h>             // For deep sleep functions
 
 // Create a default Inkplate object.
 Inkplate display;
@@ -86,16 +85,26 @@ const char *htmlRedirect = R"rawliteral(
 // Forward declaration of the function.
 void startCaptivePortal();
 
+// Timeout for captive portal (5 minutes = 300,000 ms)
+static const unsigned long CAPTIVE_PORTAL_TIMEOUT_MS = 300000;
+
+// Track when we start the captive portal
+unsigned long captivePortalStartTime = 0;
+
 void setup() {
   Serial.begin(115200);
 
-  // For testing: clear stored credentials to force captive portal mode.
-  // Comment out all lines for production
+  // Uncomment for testing: clear stored credentials to force captive portal mode.
   // preferences.begin("wifi", false);
   // preferences.clear();      // Clear all stored key/value pairs.
   // preferences.end();
-  // preferences.begin("wifi", false);
   
+  // Always open preferences for reading stored credentials
+  preferences.begin("wifi", false);
+  String storedSSID = preferences.getString("ssid", "");
+  String storedPassword = preferences.getString("password", "");
+  preferences.end();
+
   // Initialize the Inkplate display.
   display.begin();
   display.clearDisplay();
@@ -105,21 +114,18 @@ void setup() {
   display.print("Booting up...");
   display.display();
 
-  // Load stored Wi‑Fi credentials.
-  String storedSSID = preferences.getString("ssid", "");
-  String storedPassword = preferences.getString("password", "");
-
-  WiFi.mode(WIFI_STA);
+  // Attempt to connect with stored credentials if available
   if (storedSSID != "") {
-    Serial.print("Connecting to Wi‑Fi: ");
+    Serial.print("Connecting to Wi-Fi: ");
     Serial.println(storedSSID);
     display.clearDisplay();
     display.setTextColor(BLACK);
     display.setTextSize(2);
     display.setCursor(10, 20);
-    display.print("Connecting to Wi‑Fi...");
+    display.print("Connecting to Wi-Fi...");
     display.display();
 
+    WiFi.mode(WIFI_STA);
     WiFi.begin(storedSSID.c_str(), storedPassword.c_str());
 
     int attempts = 0;
@@ -130,7 +136,7 @@ void setup() {
     }
 
     if (WiFi.status() == WL_CONNECTED) {
-      Serial.println("\nConnected to Wi‑Fi!");
+      Serial.println("\nConnected to Wi-Fi!");
       Serial.print("IP Address: ");
       Serial.println(WiFi.localIP());
 
@@ -143,14 +149,15 @@ void setup() {
       display.setCursor(10, 50);
       display.print(WiFi.localIP());
       display.display();
-      return;  // Connected: exit setup.
-    }
-    else {
-      Serial.println("\nFailed to connect to stored Wi‑Fi.");
+      
+      // Connected: we can exit setup here
+      return;
+    } else {
+      Serial.println("\nFailed to connect to stored Wi-Fi.");
     }
   }
 
-  // No valid Wi‑Fi credentials or connection failed: start the captive portal.
+  // If no valid Wi‑Fi credentials or connection failed: start the captive portal
   startCaptivePortal();
 }
 
@@ -159,14 +166,14 @@ void startCaptivePortal() {
   WiFi.mode(WIFI_AP);
   WiFi.softAP(apSSID, apPassword);
 
-  // Allow time for the AP to initialize.
+  // Allow time for the AP to initialize
   delay(500);
 
-  // Print the AP IP for debugging.
+  // Print the AP IP for debugging
   Serial.print("AP IP address: ");
   Serial.println(WiFi.softAPIP());
 
-  // Update the display with instructions for the user.
+  // Update the display with instructions
   display.clearDisplay();
   display.setTextColor(BLACK);
   display.setTextSize(5);
@@ -174,35 +181,38 @@ void startCaptivePortal() {
   display.print("Wi-Fi Setup");
   display.setTextSize(2);
   display.setCursor(10, 80);
-  display.print("Connect to the network 'BjorkFrame_Setup'");
-  display.setCursor(10, 110);
-  display.print("then visit:");
-  display.setCursor(10, 130);
+  display.print("Connect to 'BjorkFrame_Setup'");
+  display.setCursor(10, 120);
+  display.print("If not prompted automatically, visit:");
+  display.setCursor(10, 145);
   display.print("http://setup.local/");
   display.display();
 
-  // Start a DNS server to redirect all requests to the Inkplate’s IP.
+  // Start a DNS server to redirect all requests to the Inkplate’s IP
   dnsServer.start(53, "*", WiFi.softAPIP());
 
-  // Start mDNS so that the friendly URL works.
+  // Start mDNS so that the friendly URL works
   if (!MDNS.begin("setup")) {
     Serial.println("Error starting mDNS");
   }
 
   // --- Define Web Routes for the Captive Portal ---
-  // Main page with the Wi-Fi setup form.
+  // Main page with the Wi-Fi setup form
   server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
     request->send(200, "text/html", htmlSetupPage);
   });
 
-  // Handle form submissions.
+  // Handle form submissions
   server.on("/setup", HTTP_POST, [](AsyncWebServerRequest *request) {
     if (request->hasParam("ssid", true) && request->hasParam("password", true)) {
       String newSSID = request->getParam("ssid", true)->value();
       String newPassword = request->getParam("password", true)->value();
 
+      // Save new credentials to Preferences
+      preferences.begin("wifi", false);
       preferences.putString("ssid", newSSID);
       preferences.putString("password", newPassword);
+      preferences.end();
 
       request->send(200, "text/html", "<html><body><h2>Wi-Fi Configured!</h2><p>Restarting...</p></body></html>");
       delay(2000);
@@ -212,7 +222,7 @@ void startCaptivePortal() {
     }
   });
 
-  // Redirect endpoints used for captive portal detection to the main setup page.
+  // Redirect endpoints used for captive portal detection to the main setup page
   server.on("/generate_204", HTTP_GET, [](AsyncWebServerRequest *request) {
     request->send(200, "text/html", htmlRedirect);
   });
@@ -226,9 +236,36 @@ void startCaptivePortal() {
     request->send(200, "text/html", htmlRedirect);
   });
 
+  // Start the HTTP server
   server.begin();
+
+  // Record the time we started the captive portal
+  captivePortalStartTime = millis();
 }
 
 void loop() {
   dnsServer.processNextRequest();
+  
+  // If in AP mode, check how long we've been up and go to sleep if timed out
+  if (WiFi.getMode() == WIFI_AP && captivePortalStartTime > 0) {
+    unsigned long elapsed = millis() - captivePortalStartTime;
+    if (elapsed >= CAPTIVE_PORTAL_TIMEOUT_MS) {
+      Serial.println("No Wi-Fi config received; going to deep sleep...");
+
+      // Enable a timed wake-up if desired (example: wake after 30s)
+      esp_sleep_enable_timer_wakeup(30ULL * 1000000ULL); // 30 seconds
+
+      // Clear (or dim) the display before sleeping if you want
+      display.clearDisplay();
+      display.setCursor(10, 50);
+      display.setTextColor(BLACK);
+      display.setTextSize(2);
+      display.print("Going to sleep...");
+      display.display();
+      delay(1000);
+
+      // Enter deep sleep
+      esp_deep_sleep_start();
+    }
+  }
 }
