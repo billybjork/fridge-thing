@@ -98,7 +98,7 @@ bool downloadToSD(const String &imageUrl, const String &localPath, WiFiClientSec
     HTTPClient http;
     http.setTimeout(10000);
 
-    client.setInsecure(); // ✅ Allow HTTPS without SSL certificate verification
+    client.setInsecure(); // Allow HTTPS without SSL certificate verification
 
     Serial.println("Downloading from: " + imageUrl);
     if (!http.begin(client, imageUrl)) {
