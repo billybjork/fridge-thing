@@ -20,7 +20,7 @@ AsyncWebServer server(80);
 DNSServer dnsServer;
 
 // Access Point settings.
-const char *apSSID = "BjorkFrame_Setup";
+const char *apSSID = "FridgeThing";
 const char *apPassword = "";  // Open network
 
 // HTML content for the Wi-Fi setup page with improved styling.
@@ -29,7 +29,7 @@ const char *htmlSetupPage = R"rawliteral(
 <html>
   <head>
     <meta charset="UTF-8">
-    <title>Bjork Frame - Wi-Fi Setup</title>
+    <title>Fridge Thing - Wi-Fi Setup</title>
     <style>
       body {
         font-family: Arial, sans-serif;
@@ -73,7 +73,7 @@ const char *htmlRedirect = R"rawliteral(
 <!DOCTYPE html>
 <html>
   <head>
-    <meta http-equiv="refresh" content="0; url=http://setup.local/">
+    <meta http-equiv="refresh" content="0; url=http://fridgething.local/">
     <title>Redirecting...</title>
   </head>
   <body>
@@ -144,7 +144,7 @@ void setup() {
       display.setTextColor(BLACK);
       display.setTextSize(2);
       display.setCursor(10, 20);
-      display.print("Wi‑Fi Connected!");
+      display.print("Wi-Fi Connected!");
       display.setTextSize(1);
       display.setCursor(10, 50);
       display.print(WiFi.localIP());
@@ -181,18 +181,18 @@ void startCaptivePortal() {
   display.print("Wi-Fi Setup");
   display.setTextSize(2);
   display.setCursor(10, 80);
-  display.print("Connect to 'BjorkFrame_Setup'");
+  display.print("Connect to the network 'FridgeThing'");
   display.setCursor(10, 120);
   display.print("If not prompted automatically, visit:");
   display.setCursor(10, 145);
-  display.print("http://setup.local/");
+  display.print("http://fridgething.local/");
   display.display();
 
   // Start a DNS server to redirect all requests to the Inkplate’s IP
   dnsServer.start(53, "*", WiFi.softAPIP());
 
   // Start mDNS so that the friendly URL works
-  if (!MDNS.begin("setup")) {
+  if (!MDNS.begin("fridgething")) {
     Serial.println("Error starting mDNS");
   }
 
