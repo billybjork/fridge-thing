@@ -1,4 +1,3 @@
-// --- WORKAROUND DEFINES ---
 #define FS_NO_GLOBALS
 
 #include <WiFi.h>
@@ -157,7 +156,7 @@ void fetchAndDisplayImage() {
 
     // The server route: /api/devices/{device_uuid}/display
     String deviceUuid = "1234-test-device";
-    String serverUrl = "http://192.168.4.137:8000/api/devices/" + deviceUuid + "/display";
+    String serverUrl = "http://192.168.4.137:8000/api/devices/" + deviceUuid + "/display"; // Update with production server URL
     WiFiClient client;
 
     // 1) POST to get {image_url, next_wake_secs}
@@ -167,7 +166,6 @@ void fetchAndDisplayImage() {
     http.addHeader("Content-Type", "application/json");
 
     StaticJsonDocument<256> doc;
-    doc["device_uuid"]    = deviceUuid; // If still required by server schema
     doc["current_fw_ver"] = "0.1";
     String body;
     serializeJson(doc, body);
@@ -222,7 +220,7 @@ void fetchAndDisplayImage() {
 }
 
 /**
- * Setup: Initialize SD, connect Wi-Fi, optionally start captive portal.
+ * Setup: Initialize SD, connect Wi-Fi, start captive portal if needed.
  */
 void setup() {
     Serial.begin(115200);
@@ -264,7 +262,7 @@ void setup() {
             Serial.print("IP: ");
             Serial.println(WiFi.localIP());
 
-            // Immediately fetch and display image (No "Wi-Fi OK!" screen)
+            // Immediately fetch and display image
             fetchAndDisplayImage();
             return;
         }
