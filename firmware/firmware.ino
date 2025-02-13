@@ -24,7 +24,7 @@ DNSServer dnsServer;
 const char *apSSID = "FridgeThing";
 const char *apPassword = "";
 
-// HTML content for Wi-Fi setup page (using \n for new lines)
+// HTML content for Wi-Fi setup page
 const char *htmlSetupPage =
 "<!DOCTYPE html>\n"
 "<html>\n"
@@ -155,7 +155,8 @@ void fetchAndDisplayImage() {
         return;
     }
 
-    String serverUrl = "http://192.168.4.137:8000/api/display";
+    String deviceUuid = "1234-test-device";
+    String serverUrl = "http://192.168.4.137:8000/api/devices/" + deviceUuid + "/display";
     WiFiClient client;
 
     // 1) POST to get {image_url, next_wake_secs}
@@ -165,7 +166,6 @@ void fetchAndDisplayImage() {
     http.addHeader("Content-Type", "application/json");
 
     StaticJsonDocument<256> doc;
-    doc["device_uuid"]    = "1234-test-device";
     doc["current_fw_ver"] = "0.1";
     String body;
     serializeJson(doc, body);
