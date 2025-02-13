@@ -155,6 +155,7 @@ void fetchAndDisplayImage() {
         return;
     }
 
+    // The server route: /api/devices/{device_uuid}/display
     String deviceUuid = "1234-test-device";
     String serverUrl = "http://192.168.4.137:8000/api/devices/" + deviceUuid + "/display";
     WiFiClient client;
@@ -166,16 +167,18 @@ void fetchAndDisplayImage() {
     http.addHeader("Content-Type", "application/json");
 
     StaticJsonDocument<256> doc;
+    doc["device_uuid"]    = deviceUuid; // If still required by server schema
     doc["current_fw_ver"] = "0.1";
     String body;
     serializeJson(doc, body);
 
     int httpCode = http.POST(body);
     if (httpCode != 200) {
-        Serial.printf("ERROR: POST /api/display code=%d\n", httpCode);
+        Serial.printf("ERROR: POST /api/devices/.../display code=%d\n", httpCode);
         http.end();
         return;
     }
+
     String resp = http.getString();
     Serial.println("Server response: " + resp);
 
@@ -187,6 +190,7 @@ void fetchAndDisplayImage() {
         return;
     }
 
+    // Extract data from server response
     String imageUrl    = respDoc["image_url"].as<String>();
     long   nextWakeSec = respDoc["next_wake_secs"].as<long>();
 
@@ -260,93 +264,88 @@ void setup() {
             Serial.print("IP: ");
             Serial.println(WiFi.localIP());
 
-            display.clearDisplay();
-            display.setTextSize(2);
-            display.setCursor(10, 20);
-            display.print("Wi-Fi OK!");
-            display.display();
-
-            delay(2000);
+            // Immediately fetch and display image (No "Wi-Fi OK!" screen)
             fetchAndDisplayImage();
             return;
         }
     }
-    // If fail, captivePortal...
+
+    // If Wi-Fi fails, start captive portal
     startCaptivePortal();
 }
 
 /**
- * Start captive portal if no Wi-Fi credentials exist.
+ * Start captive portal if no Wi-Fi credentials exist or connect fails.
  */
 void startCaptivePortal() {
-  Serial.println("\nStarting Captive Portal...");
-  WiFi.mode(WIFI_AP);
-  WiFi.softAP(apSSID, apPassword);
+    Serial.println("\nStarting Captive Portal...");
+    WiFi.mode(WIFI_AP);
+    WiFi.softAP(apSSID, apPassword);
 
-  // Show instructions
-  display.clearDisplay();
-  display.setTextColor(BLACK);
-  display.setTextSize(5);
-  display.setCursor(10, 10);
-  display.print("Wi-Fi Setup");
-  display.setTextSize(2);
-  display.setCursor(10, 80);
-  display.print("Connect to 'FridgeThing'");
-  display.setCursor(10, 120);
-  display.print("Visit: http://fridgething.local/");
-  display.display();
+    // Show instructions on display
+    display.clearDisplay();
+    display.setTextColor(BLACK);
+    display.setTextSize(5);
+    display.setCursor(10, 10);
+    display.print("Wi-Fi Setup");
+    display.setTextSize(2);
+    display.setCursor(10, 80);
+    display.print("Connect to 'FridgeThing'");
+    display.setCursor(10, 120);
+    display.print("Visit: http://fridgething.local/");
+    display.display();
 
-  // Start DNS redirection
-  dnsServer.start(53, "*", WiFi.softAPIP());
+    // Start DNS redirection
+    dnsServer.start(53, "*", WiFi.softAPIP());
 
-  // Start mDNS
-  if (!MDNS.begin("fridgething")) {
-    Serial.println("Error starting mDNS");
-  }
-
-  // Setup captive portal routes
-  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
-    request->send(200, "text/html", htmlSetupPage);
-  });
-
-  server.on("/setup", HTTP_POST, [](AsyncWebServerRequest *request) {
-    if (request->hasParam("ssid", true) && request->hasParam("password", true)) {
-      String newSSID = request->getParam("ssid", true)->value();
-      String newPassword = request->getParam("password", true)->value();
-
-      preferences.begin("wifi", false);
-      preferences.putString("ssid", newSSID);
-      preferences.putString("password", newPassword);
-      preferences.end();
-
-      request->send(200, "text/html",
-                    "<html><body><h2>Wi-Fi Configured!</h2><p>Restarting...</p></body></html>");
-      delay(2000);
-      ESP.restart();
-    } else {
-      request->send(400, "text/plain", "Missing SSID or Password");
+    // Start mDNS
+    if (!MDNS.begin("fridgething")) {
+        Serial.println("Error starting mDNS");
     }
-  });
 
-  // Captive portal redirections
-  server.on("/generate_204", HTTP_GET, [](AsyncWebServerRequest *request) {
-    request->send(200, "text/html", htmlRedirect);
-  });
-  server.on("/hotspot-detect.html", HTTP_GET, [](AsyncWebServerRequest *request) {
-    request->send(200, "text/html", htmlRedirect);
-  });
-  server.on("/fwlink", HTTP_GET, [](AsyncWebServerRequest *request) {
-    request->send(200, "text/html", htmlRedirect);
-  });
-  server.onNotFound([](AsyncWebServerRequest *request) {
-    request->send(200, "text/html", htmlRedirect);
-  });
+    // Setup captive portal routes
+    server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
+        request->send(200, "text/html", htmlSetupPage);
+    });
 
-  // Start HTTP server
-  server.begin();
+    server.on("/setup", HTTP_POST, [](AsyncWebServerRequest *request) {
+        if (request->hasParam("ssid", true) && request->hasParam("password", true)) {
+            String newSSID = request->getParam("ssid", true)->value();
+            String newPassword = request->getParam("password", true)->value();
 
-  // Record the time we started
-  captivePortalStartTime = millis();
+            preferences.begin("wifi", false);
+            preferences.putString("ssid", newSSID);
+            preferences.putString("password", newPassword);
+            preferences.end();
+
+            request->send(200, "text/html",
+                          "<html><body><h2>Wi-Fi Configured!</h2><p>Restarting...</p></body></html>");
+            delay(2000);
+            ESP.restart();
+        } else {
+            request->send(400, "text/plain", "Missing SSID or Password");
+        }
+    });
+
+    // Common captive portal redirections
+    server.on("/generate_204", HTTP_GET, [](AsyncWebServerRequest *request) {
+        request->send(200, "text/html", htmlRedirect);
+    });
+    server.on("/hotspot-detect.html", HTTP_GET, [](AsyncWebServerRequest *request) {
+        request->send(200, "text/html", htmlRedirect);
+    });
+    server.on("/fwlink", HTTP_GET, [](AsyncWebServerRequest *request) {
+        request->send(200, "text/html", htmlRedirect);
+    });
+    server.onNotFound([](AsyncWebServerRequest *request) {
+        request->send(200, "text/html", htmlRedirect);
+    });
+
+    // Start HTTP server
+    server.begin();
+
+    // Record the time we started (for eventual timeout)
+    captivePortalStartTime = millis();
 }
 
 /**
@@ -354,23 +353,24 @@ void startCaptivePortal() {
  * - Handle captive portal timeouts.
  */
 void loop() {
-  dnsServer.processNextRequest();
+    dnsServer.processNextRequest();
 
-  // If in AP mode, check if user took too long
-  if (WiFi.getMode() == WIFI_AP && captivePortalStartTime > 0) {
-    unsigned long elapsed = millis() - captivePortalStartTime;
-    if (elapsed >= CAPTIVE_PORTAL_TIMEOUT_MS) {
-      Serial.println("No Wi-Fi config received; going to deep sleep...");
+    // If in AP mode, check if user took too long
+    if (WiFi.getMode() == WIFI_AP && captivePortalStartTime > 0) {
+        unsigned long elapsed = millis() - captivePortalStartTime;
+        if (elapsed >= 300000UL) {  // 5 minutes
+            Serial.println("No Wi-Fi config received; going to deep sleep...");
 
-      esp_sleep_enable_timer_wakeup(30ULL * 1000000ULL);
-      display.clearDisplay();
-      display.setCursor(10, 50);
-      display.setTextSize(2);
-      display.print("Going to sleep...");
-      display.display();
-      delay(1000);
+            // Sleep for 30 seconds, or any appropriate fallback
+            esp_sleep_enable_timer_wakeup(30ULL * 1000000ULL);
+            display.clearDisplay();
+            display.setCursor(10, 50);
+            display.setTextSize(2);
+            display.print("Going to sleep...");
+            display.display();
+            delay(1000);
 
-      esp_deep_sleep_start();
+            esp_deep_sleep_start();
+        }
     }
-  }
 }
