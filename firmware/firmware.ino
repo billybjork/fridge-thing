@@ -88,16 +88,14 @@ unsigned long captivePortalStartTime = 0;
 void startCaptivePortal();
 
 /**
- * Download a file (BMP) from 'imageUrl' using WiFiClientSecure
+ * Download a file (BMP) from 'imageUrl' using WiFiClient
  * and store it on the SD card at 'localPath' (e.g. "/temp.bmp")
  * using SdFat's SdFile. Return true if successful, false otherwise.
  */
-bool downloadToSD(const String &imageUrl, const String &localPath, WiFiClientSecure &client)
+bool downloadToSD(const String &imageUrl, const String &localPath, WiFiClient &client)
 {
     HTTPClient http;
     http.setTimeout(10000);
-
-    client.setInsecure(); // Allow HTTPS without SSL certificate verification
 
     Serial.println("Downloading from: " + imageUrl);
     if (!http.begin(client, imageUrl)) {
@@ -192,12 +190,9 @@ void fetchAndDisplayImage() {
     String imageUrl    = respDoc["image_url"].as<String>();
     long   nextWakeSec = respDoc["next_wake_secs"].as<long>();
 
-    // 2) Download file to SD
-    WiFiClientSecure imageClient;
-    imageClient.setInsecure();
+    // 2) Download file to SD using a plain WiFiClient (not WiFiClientSecure)
     const String localPath = "/temp.bmp";
-
-    if (!downloadToSD(imageUrl, localPath, imageClient)) {
+    if (!downloadToSD(imageUrl, localPath, client)) {
         Serial.println("ERROR: Could not download image");
         return;
     }
