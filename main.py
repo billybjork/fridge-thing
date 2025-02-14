@@ -57,18 +57,6 @@ async def get_or_create_device(conn: asyncpg.Connection, device_uuid: str) -> di
         }
     return dict(row)
 
-async def log_event(conn: asyncpg.Connection, device_id: int, event_type: str, message: str = "") -> None:
-    """
-    Log an event (e.g., device wake-up).
-    """
-    await conn.execute(
-        """
-        INSERT INTO device_logs (device_id, event_type, message)
-        VALUES ($1, $2, $3)
-        """,
-        device_id, event_type, message
-    )
-
 # ------------------------------------------------------------------------------
 # Pydantic Schemas
 # ------------------------------------------------------------------------------
@@ -109,9 +97,6 @@ async def get_display(
     async with pool.acquire() as conn:
         device_row = await get_or_create_device(conn, device_uuid)
         device_id = device_row["id"]
-
-        # Log device wake-up event
-        await log_event(conn, device_id, "wake", f"current_fw_ver={request_data.current_fw_ver}")
 
         # Retrieve channel information
         channel_id = device_row.get("channel_id")
