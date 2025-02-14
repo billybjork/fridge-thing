@@ -98,6 +98,9 @@ float voltageToPercent(float voltage) {
  * Download a file (BMP) from 'imageUrl' using WiFiClient
  * and store it on the SD card at 'localPath' (e.g. "/temp.bmp")
  * using SdFat's SdFile. Return true if successful, false otherwise.
+ *
+ * Updated: This version adds a timeout mechanism to break out of the loop
+ *          if no new data is received for 10 seconds.
  */
 bool downloadToSD(const String &imageUrl, const String &localPath, WiFiClient &client)
 {
@@ -133,12 +136,18 @@ bool downloadToSD(const String &imageUrl, const String &localPath, WiFiClient &c
 
     uint8_t buff[512];
     int totalBytes = 0;
-    while (stream->connected() || stream->available()) {
-        size_t size = stream->available();
-        if (size) {
-            int c = stream->readBytes((char*)buff, (size > sizeof(buff)) ? sizeof(buff) : size);
-            outFile.write(buff, c);
-            totalBytes += c;
+    unsigned long lastReadTime = millis();
+    // Loop until the stream is no longer providing data for 10 seconds
+    while ((millis() - lastReadTime) < 10000) {
+        size_t availableBytes = stream->available();
+        if (availableBytes > 0) {
+            lastReadTime = millis();  // reset timeout since we got data
+            int bytesRead = stream->readBytes((char*)buff, (availableBytes > sizeof(buff)) ? sizeof(buff) : availableBytes);
+            outFile.write(buff, bytesRead);
+            totalBytes += bytesRead;
+        } else if (!stream->connected()) {
+            // If not connected and no data available, assume download complete.
+            break;
         }
         delay(1);
     }
@@ -162,15 +171,16 @@ void fetchAndDisplayImage() {
 
     // Generate a unique device ID based on the ESP32's MAC address.
     // The ESP32 has a unique 48-bit MAC address which we format as a hexadecimal string.
-    uint64_t chipid = ESP.getEfuseMac(); // The chip ID is essentially the MAC address
+    uint64_t chipid = ESP.getEfuseMac();
     char deviceId[17]; // 16 characters + null terminator
     sprintf(deviceId, "%04X%08X", (uint16_t)(chipid >> 32), (uint32_t)chipid);
     String deviceUuid = String(deviceId);
     Serial.println("Device UUID: " + deviceUuid);
 
     // The server route: /api/devices/{device_uuid}/display
-    String serverUrl = "http://192.168.4.137:8000/api/devices/" + deviceUuid + "/display"; // Update with production server URL
-    WiFiClient client;
+    String serverUrl = "https://fridge-thing-production.up.railway.app/api/devices/" + deviceUuid + "/display";
+    WiFiClientSecure client;
+    client.setInsecure();
 
     // 1) POST to get {image_url, next_wake_secs}
     HTTPClient http;
@@ -205,7 +215,12 @@ void fetchAndDisplayImage() {
     String imageUrl    = respDoc["image_url"].as<String>();
     long   nextWakeSec = respDoc["next_wake_secs"].as<long>();
 
-    // 2) Download file to SD using a plain WiFiClient (not WiFiClientSecure)
+    // --- Firmware change: Ensure the image URL uses HTTPS ---
+    if (imageUrl.startsWith("http://")) {
+        imageUrl.replace("http://", "https://");
+    }
+
+    // 2) Download file to SD using the secure client (WiFiClientSecure)
     const String localPath = "/temp.bmp";
     if (!downloadToSD(imageUrl, localPath, client)) {
         Serial.println("ERROR: Could not download image");
