@@ -84,8 +84,15 @@ const char *htmlRedirect =
 static const unsigned long CAPTIVE_PORTAL_TIMEOUT_MS = 300000;
 unsigned long captivePortalStartTime = 0;
 
-// Forward declaration
-void startCaptivePortal();
+// Helper function: Convert voltage (3.2V–4.2V) to approximate battery percentage
+float voltageToPercent(float voltage) {
+    // Linear approximation for LiPo battery:
+    // 4.2V -> 100% and 3.2V -> 0%
+    float pct = (voltage - 3.2f) * 100.0f / (4.2f - 3.2f);
+    if (pct > 100.0f) pct = 100.0f;
+    if (pct < 0.0f)   pct = 0.0f;
+    return pct;
+}
 
 /**
  * Download a file (BMP) from 'imageUrl' using WiFiClient
@@ -145,6 +152,7 @@ bool downloadToSD(const String &imageUrl, const String &localPath, WiFiClient &c
 
 /**
  * Fetch a BMP image from the server, store on SD, then display it with drawImage().
+ * Additionally, overlay a low battery indicator if battery is below 10%.
  */
 void fetchAndDisplayImage() {
     if (WiFi.status() != WL_CONNECTED) {
@@ -197,7 +205,7 @@ void fetchAndDisplayImage() {
         return;
     }
 
-    // 3) Use drawImage on the local file
+    // 3) Render the downloaded image with drawImage()
     Serial.println("Rendering downloaded image with drawImage...");
     bool ok = display.drawImage(localPath.c_str(), 0, 0);
     if (!ok) {
@@ -206,6 +214,26 @@ void fetchAndDisplayImage() {
         Serial.println("BMP image displayed successfully.");
     }
 
+    // --- Low Battery Indicator Implementation ---
+    double voltage = display.readBattery();
+    float batteryPercent = voltageToPercent(voltage);
+    Serial.print("Battery Voltage: ");
+    Serial.print(voltage, 2);
+    Serial.print(" V (");
+    Serial.print(batteryPercent, 1);
+    Serial.println("%)");
+
+    if (batteryPercent < 10.0f) {
+        // Draw a white rectangle to clear an area and overlay the warning text.
+        display.fillRect(0, 0, 200, 30, WHITE); // Adjust the dimensions as needed.
+        display.setTextSize(2);
+        display.setTextColor(BLACK);
+        display.setCursor(10, 10);
+        display.print("LOW BATTERY!");
+    }
+    // --- End Low Battery Indicator ---
+
+    // Update the display with the final content
     display.display();
 
     // 4) Deep sleep
@@ -225,10 +253,10 @@ void setup() {
     String storedPass = preferences.getString("password", "");
     preferences.end();
 
-    // Inkplate init
+    // Initialize Inkplate display
     display.begin();
 
-    // Inkplate sdCardInit
+    // Initialize SD card
     if (!display.sdCardInit()) {
         Serial.println("SD init failed. We'll keep going, but can't store images!");
     }
@@ -240,7 +268,7 @@ void setup() {
     display.print("Booting...");
     display.display();
 
-    // Attempt Wi-Fi
+    // Attempt Wi-Fi connection
     if (storedSSID != "") {
         WiFi.mode(WIFI_STA);
         WiFi.begin(storedSSID.c_str(), storedPass.c_str());
@@ -263,7 +291,7 @@ void setup() {
         }
     }
 
-    // If Wi-Fi fails, start captive portal
+    // If Wi-Fi fails, start the captive portal
     startCaptivePortal();
 }
 
@@ -354,7 +382,7 @@ void loop() {
         if (elapsed >= 300000UL) {  // 5 minutes
             Serial.println("No Wi-Fi config received; going to deep sleep...");
 
-            // Sleep for 30 seconds, or any appropriate fallback
+            // Sleep for 30 seconds (or any appropriate fallback)
             esp_sleep_enable_timer_wakeup(30ULL * 1000000ULL);
             display.clearDisplay();
             display.setCursor(10, 50);

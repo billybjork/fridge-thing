@@ -14,7 +14,7 @@ router = APIRouter()
 
 # ----- Configuration for Random Channel -----
 TARGET_RESOLUTION = (600, 448)
-DEFAULT_FALLBACK_IMAGE = "https://s3.us-west-1.amazonaws.com/bjork.love/test.bmp"
+DEFAULT_FALLBACK_IMAGE = "https://s3.us-west-1.amazonaws.com/bjork.love/21977917882_ffae88748b_o.bmp"
 
 async def get_random_image_url(conn: asyncpg.Connection) -> str:
     """

@@ -23,18 +23,12 @@ load_dotenv()
 # Database configuration
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-# S3 configuration (remove if not used)
-S3_ACCESS_KEY = os.getenv("S3_ACCESS_KEY")
-S3_SECRET_KEY = os.getenv("S3_SECRET_KEY")
-S3_BUCKET_NAME = os.getenv("S3_BUCKET_NAME")
-S3_REGION = os.getenv("S3_REGION")
-
 # Server configuration
 SERVER_HOST = os.getenv("SERVER_HOST", "0.0.0.0")
 SERVER_PORT = int(os.getenv("SERVER_PORT", 8000))
 
 # Default fallback image (used if no valid image is found)
-DEFAULT_FALLBACK_IMAGE = "https://s3.us-west-1.amazonaws.com/bjork.love/test.bmp"
+DEFAULT_FALLBACK_IMAGE = "https://s3.us-west-1.amazonaws.com/bjork.love/21977917882_ffae88748b_o.bmp"
 
 # Target resolution for display (Inkplate 6 Color)
 TARGET_RESOLUTION = (600, 448)
@@ -129,9 +123,10 @@ async def get_display(
 
         # For 'daily' and 'random' channels, use dedicated endpoints.
         if channel_key == "daily":
-            image_url = str(request.url_for("convert_daily"))
+            # Convert URL object to string then append query parameters
+            image_url = str(request.url_for("convert_daily")) + f"?device_uuid={device_uuid}"
         elif channel_key == "random":
-            image_url = str(request.url_for("convert_random"))
+            image_url = str(request.url_for("convert_random")) + f"?device_uuid={device_uuid}"
         else:
             # For any other channel, fallback to the default handler.
             image_url = await fallback_image_handler(conn)

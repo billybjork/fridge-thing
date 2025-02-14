@@ -1,3 +1,4 @@
+import os
 import io
 import random
 from datetime import datetime, timedelta
@@ -19,7 +20,7 @@ TARGET_RESOLUTION = (600, 448)
 IMAGE_REPEAT_THRESHOLD = 10       # in days
 IMAGE_FALLBACK_SEARCH_DAYS = 30     # how many days back we look for fallback images
 IMAGE_FALLBACK_LIMIT = 5            # how many images we pick for fallback scenario
-DEFAULT_FALLBACK_IMAGE = "https://s3.us-west-1.amazonaws.com/bjork.love/test.bmp"
+DEFAULT_FALLBACK_IMAGE = "https://s3.us-west-1.amazonaws.com/bjork.love/21977917882_ffae88748b_o.bmp"
 
 # ----- Database Query Functions for Daily Channel -----
 
@@ -83,9 +84,6 @@ async def find_images_for_today_and_fallback(conn: asyncpg.Connection):
     today_md = today.strftime("%m-%d")
     today_images = await query_images_by_month_day(conn, today_md)
 
-    print(f"DEBUG: Today's date format -> {today_md}")
-    print(f"DEBUG: Found {len(today_images)} images for today.")
-
     if today_images:
         return today_images, False
 
@@ -127,54 +125,106 @@ def fill_letterbox(img: Image.Image, target_width: int, target_height: int) -> I
     img_np = np.vstack([top_fill_array, img_np, bottom_fill_array])
     return Image.fromarray(img_np.astype("uint8"))
 
-def overlay_date_text(image: Image.Image, date_obj: datetime, fallback_used: bool) -> Image.Image:
+def format_date_ordinal(date_obj: datetime) -> str:
     """
-    Overlay the date text on the image.
-    Draws the month/day at the bottom right and the year at the top left.
+    Convert a datetime object to a string like "January 1st, 2023",
+    adding the correct ordinal suffix.
+    """
+    day = date_obj.day
+    if 11 <= day % 100 <= 13:
+        suffix = 'th'
+    else:
+        suffix = {1: 'st', 2: 'nd', 3: 'rd'}.get(day % 10, 'th')
+    return f"{date_obj.strftime('%B')} {day}{suffix}, {date_obj.year}"
+
+def overlay_date_text(image, date_obj: datetime, fallback_used: bool) -> 'Image.Image':
+    """
+    Overlay the formatted date text on the image.
+    Displays the month/day in the bottom-right (using a larger font)
+    and a “years ago…” text in the top-left (using a smaller font).
+
+    If fallback_used is True, an asterisk is added to today's date.
     """
     draw = ImageDraw.Draw(image)
     margin = 10
 
-    # Use default font; you can specify a TTF file if desired.
-    month_day_text = date_obj.strftime("%B %d")
-    year_text = date_obj.strftime("%Y")
-    font = ImageFont.load_default()
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    font_path = os.path.join(script_dir, "..", "fonts", "EBGaramond12-Regular.otf")
 
-    # Get text bounding box for dimensions
-    bbox_md = draw.textbbox((0, 0), month_day_text, font=font)
+    # Define font sizes
+    month_day_font_size = 60
+    years_ago_font_size = 40
+
+    try:
+        month_day_font = ImageFont.truetype(font_path, month_day_font_size)
+        years_ago_font = ImageFont.truetype(font_path, years_ago_font_size)
+    except Exception as e:
+        print(f"Error loading custom font: {e}. Falling back to default font.")
+        month_day_font = ImageFont.load_default()
+        years_ago_font = ImageFont.load_default()
+
+    # Determine the texts based on whether fallback is in use.
+    if fallback_used:
+        today = datetime.now()
+        formatted_date = format_date_ordinal(today)
+        formatted_date = f"*{formatted_date}"
+        current_year = today.year
+        years_diff = current_year - date_obj.year
+    else:
+        formatted_date = format_date_ordinal(date_obj)
+        current_year = datetime.now().year
+        years_diff = current_year - date_obj.year
+
+    # For the month/day text, take everything before the comma.
+    if ", " in formatted_date:
+        month_day_text = formatted_date.split(",")[0]
+    else:
+        month_day_text = formatted_date
+
+    # Prepare the "years ago" text.
+    years_ago_text = f"{years_diff} years ago..." if years_diff > 1 else "Last year..."
+
+    # Calculate bounding boxes for placement.
+    bbox_md = draw.textbbox((0, 0), month_day_text, font=month_day_font)
     md_width = bbox_md[2] - bbox_md[0]
     md_height = bbox_md[3] - bbox_md[1]
 
-    bbox_year = draw.textbbox((0, 0), year_text, font=font)
-    year_width = bbox_year[2] - bbox_year[0]
-    year_height = bbox_year[3] - bbox_year[1]
+    bbox_ya = draw.textbbox((0, 0), years_ago_text, font=years_ago_font)
+    ya_width = bbox_ya[2] - bbox_ya[0]
+    ya_height = bbox_ya[3] - bbox_ya[1]
 
-    # Calculate positions
+    # Position the month/day text in the bottom-right.
     x_md = image.width - md_width - margin
     y_md = image.height - md_height - margin
 
-    x_year = margin
-    y_year = margin
+    # Position the years-ago text in the top-left.
+    x_ya = margin
+    y_ya = margin
 
-    # Draw text on the image
-    draw.text((x_md, y_md), month_day_text, fill="black", font=font)
-    draw.text((x_year, y_year), year_text, fill="black", font=font)
-    
+    # (Optional) You could add logic here to choose text color based on background brightness.
+    text_color = "black"
+
+    # Draw the texts on the image.
+    draw.text((x_md, y_md), month_day_text, fill=text_color, font=month_day_font)
+    draw.text((x_ya, y_ya), years_ago_text, fill=text_color, font=years_ago_font)
+
     return image
 
-async def process_daily_image(conn: asyncpg.Connection) -> bytes:
+async def process_daily_image(conn: asyncpg.Connection, device_uuid: str = "0") -> bytes:
     """
     Use the advanced daily logic to pick a daily image (with fallback if needed),
-    fetch it, overlay the date text, and return the BMP image bytes.
+    fetch it, overlay the date text, log the display event, and return the BMP image bytes.
     """
     images, fallback_used = await find_images_for_today_and_fallback(conn)
     if not images:
         image_url = DEFAULT_FALLBACK_IMAGE
         image_date = datetime.now()
+        image_uuid = None  # Nothing to log in this case.
     else:
         chosen = random.choice(images)
         image_url = chosen["image_proxy_s3_object_url"]
         image_date = chosen["image_creation_date"]
+        image_uuid = chosen["uuid"]
 
     # Fetch the image using aiohttp.
     async with aiohttp.ClientSession() as session:
@@ -201,14 +251,31 @@ async def process_daily_image(conn: asyncpg.Connection) -> bytes:
     # Convert to BMP bytes.
     output_buffer = io.BytesIO()
     image.save(output_buffer, format="BMP")
+
+    # Log the image display if we have a uuid.
+    if image_uuid:
+        await log_image_displayed(conn, image_uuid, device_uuid)
+    
     return output_buffer.getvalue()
 
+async def log_image_displayed(conn: asyncpg.Connection, uuid_val: str, device_uuid: str = "0"):
+    """
+    Log that an image was displayed by inserting a record into display_logs.
+    device_uuid defaults to "0" if not provided.
+    """
+    display_date = datetime.now().date()
+    # Convert uuid_val to string before passing it in.
+    await conn.execute(
+        """
+        INSERT INTO display_logs (uuid, display_date, device_uuid)
+        VALUES ($1, $2, $3)
+        """,
+        str(uuid_val), display_date, device_uuid,
+    )
+
 @router.get("/api/daily_convert", name="convert_daily")
-async def convert_daily(request: Request):
-    """
-    Endpoint that uses the advanced daily logic to produce a BMP image.
-    """
+async def convert_daily(request: Request, device_uuid: str = "0"):
     pool = request.app.state.pool
     async with pool.acquire() as conn:
-        bmp_data = await process_daily_image(conn)
+        bmp_data = await process_daily_image(conn, device_uuid)
     return Response(content=bmp_data, media_type="image/bmp")
