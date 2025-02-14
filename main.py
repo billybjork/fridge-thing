@@ -1,7 +1,7 @@
 import os
 import random
 from contextlib import asynccontextmanager
-from typing import Optional, Callable, Awaitable
+from typing import Optional
 
 import asyncpg
 from dotenv import load_dotenv
@@ -23,7 +23,7 @@ load_dotenv()
 # Database configuration
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-# S3 configuration (remove?)
+# S3 configuration (remove if not used)
 S3_ACCESS_KEY = os.getenv("S3_ACCESS_KEY")
 S3_SECRET_KEY = os.getenv("S3_SECRET_KEY")
 S3_BUCKET_NAME = os.getenv("S3_BUCKET_NAME")
@@ -89,43 +89,15 @@ class DeviceDisplayResponse(BaseModel):
     next_wake_secs: int
 
 # ------------------------------------------------------------------------------
-# Image Selection Based on Channel
+# Fallback image handler
 # ------------------------------------------------------------------------------
 
-async def get_random_image_url(conn: asyncpg.Connection) -> str:
-    """
-    Select a random image from the assets table.
-    Ensures a valid URL is always returned.
-    """
-    row = await conn.fetchrow(
-        "SELECT image_proxy_s3_object_url FROM assets WHERE image_proxy_s3_object_url IS NOT NULL ORDER BY random() LIMIT 1"
-    )
-    return row["image_proxy_s3_object_url"] if row else DEFAULT_FALLBACK_IMAGE
-
-async def get_daily_image_url(conn: asyncpg.Connection) -> str:
-    """
-    Select the 'daily' image from the assets table.
-    Ensures a valid URL is always returned.
-    """
-    row = await conn.fetchrow(
-        "SELECT image_proxy_s3_object_url FROM assets WHERE image_creation_date = CURRENT_DATE AND image_proxy_s3_object_url IS NOT NULL LIMIT 1"
-    )
-    return row["image_proxy_s3_object_url"] if row else DEFAULT_FALLBACK_IMAGE
-
-# Use an async fallback function:
 async def fallback_image_handler(conn: asyncpg.Connection) -> str:
     """
-    Always returns the default fallback image URL. 
+    Always returns the default fallback image URL.
     Defined as async so we can 'await' it just like the other handlers.
     """
     return DEFAULT_FALLBACK_IMAGE
-
-# Dictionary-based dynamic function routing for channels
-# Note the type hint: Callable[[asyncpg.Connection], Awaitable[str]]
-IMAGE_HANDLERS: dict[str, Callable[[asyncpg.Connection], Awaitable[str]]] = {
-    "random": get_random_image_url,
-    "daily": get_daily_image_url
-}
 
 # ------------------------------------------------------------------------------
 # API Routes
@@ -155,20 +127,18 @@ async def get_display(
             if channel_row:
                 channel_key = channel_row["channel_key"]
 
-        # Dynamically select the appropriate image function or fallback
-        image_handler = IMAGE_HANDLERS.get(channel_key, fallback_image_handler)
-        image_url = await image_handler(conn)
+        # For 'daily' and 'random' channels, use dedicated endpoints.
+        if channel_key == "daily":
+            image_url = str(request.url_for("convert_daily"))
+        elif channel_key == "random":
+            image_url = str(request.url_for("convert_random"))
+        else:
+            # For any other channel, fallback to the default handler.
+            image_url = await fallback_image_handler(conn)
+            convert_endpoint = str(request.url_for("convert_image"))
+            image_url = convert_endpoint + "?" + urlencode({"url": image_url})
 
-        # Ensure a valid image_url is returned
-        if not image_url:
-            image_url = DEFAULT_FALLBACK_IMAGE
-
-        # Build the URL for our on-demand conversion endpoint.
-        # Convert the URL object to string to allow string concatenation.
-        convert_endpoint = str(request.url_for("convert_image"))
-        converted_image_url = convert_endpoint + "?" + urlencode({"url": image_url})
-
-        return DeviceDisplayResponse(image_url=converted_image_url, next_wake_secs=device_row.get("next_wake_secs", 3600))
+        return DeviceDisplayResponse(image_url=image_url, next_wake_secs=device_row.get("next_wake_secs", 3600))
 
 @router.get("/api/convert", name="convert_image")
 async def convert_image(url: str):
@@ -266,6 +236,10 @@ def fill_letterbox(img: Image.Image, target_width: int, target_height: int) -> I
 # FastAPI Application Setup
 # ------------------------------------------------------------------------------
 
+# Import channel routers from the subfolder.
+from channels.daily_channel import router as daily_router
+from channels.random_channel import router as random_router
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
@@ -277,6 +251,8 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Fridge Thing API", lifespan=lifespan)
 app.include_router(router)
+app.include_router(daily_router)
+app.include_router(random_router)
 
 # ------------------------------------------------------------------------------
 # Entry Point
