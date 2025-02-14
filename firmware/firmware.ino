@@ -268,12 +268,16 @@ void setup() {
         Serial.println("SD init failed. We'll keep going, but can't store images!");
     }
 
-    display.clearDisplay();
-    display.setTextColor(BLACK);
-    display.setTextSize(4);
-    display.setCursor(10, 20);
-    display.print("Booting...");
-    display.display();
+    // Only display booting screen on a cold start.
+    // If waking from deep sleep (timer wakeup), skip booting to allow a seamless image refresh.
+    if (esp_sleep_get_wakeup_cause() != ESP_SLEEP_WAKEUP_TIMER) {
+        display.clearDisplay();
+        display.setTextColor(BLACK);
+        display.setTextSize(4);
+        display.setCursor(10, 20);
+        display.print("Booting...");
+        display.display();
+    }
 
     // Attempt Wi-Fi connection
     if (storedSSID != "") {
