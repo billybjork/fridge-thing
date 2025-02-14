@@ -160,8 +160,15 @@ void fetchAndDisplayImage() {
         return;
     }
 
+    // Generate a unique device ID based on the ESP32's MAC address.
+    // The ESP32 has a unique 48-bit MAC address which we format as a hexadecimal string.
+    uint64_t chipid = ESP.getEfuseMac(); // The chip ID is essentially the MAC address
+    char deviceId[17]; // 16 characters + null terminator
+    sprintf(deviceId, "%04X%08X", (uint16_t)(chipid >> 32), (uint32_t)chipid);
+    String deviceUuid = String(deviceId);
+    Serial.println("Device UUID: " + deviceUuid);
+
     // The server route: /api/devices/{device_uuid}/display
-    String deviceUuid = "1234-test-device";
     String serverUrl = "http://192.168.4.137:8000/api/devices/" + deviceUuid + "/display"; // Update with production server URL
     WiFiClient client;
 
