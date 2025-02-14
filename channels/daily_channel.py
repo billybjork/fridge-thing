@@ -201,8 +201,13 @@ def overlay_date_text(image, date_obj: datetime, fallback_used: bool) -> 'Image.
     x_ya = margin
     y_ya = margin
 
-    # (Optional) You could add logic here to choose text color based on background brightness.
-    text_color = "black"
+    # Dynamically choose text color based on image brightness ---
+    # Convert the image to grayscale and compute its average brightness.
+    grayscale = image.convert("L")
+    avg_brightness = np.mean(np.array(grayscale))
+    # If the image is dark, use white text; otherwise, use black text.
+    text_color = "white" if avg_brightness < 128 else "black"
+    # ---------------------------------------------------------------------------
 
     # Draw the texts on the image.
     draw.text((x_md, y_md), month_day_text, fill=text_color, font=month_day_font)
