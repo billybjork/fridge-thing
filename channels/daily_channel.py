@@ -41,40 +41,43 @@ async def query_images_by_month_day(conn: asyncpg.Connection, month_day: str):
     )
     return rows
 
-async def check_image_displayed_recently(conn: asyncpg.Connection, uuid_val: str, threshold_date: datetime.date):
+async def check_image_displayed_recently(conn: asyncpg.Connection, uuid_val: str, device_uuid: str, threshold_date: datetime.date):
     """
-    Check whether the image with uuid_val has been displayed on or after threshold_date.
+    Check whether the image with uuid_val has been displayed on or after threshold_date
+    for the specific device_uuid.
     (Assumes a display_logs table exists.)
     """
     row = await conn.fetchrow(
         """
         SELECT COUNT(*) AS cnt 
         FROM display_logs
-        WHERE uuid = $1 AND display_date >= $2
+        WHERE uuid = $1 AND device_uuid = $2 AND display_date >= $3
         """,
-        uuid_val,
+        str(uuid_val),  # Convert UUID to string
+        str(device_uuid),
         threshold_date,
     )
     return row["cnt"] > 0
 
-async def find_eligible_images_for_date(conn: asyncpg.Connection, month_day: str):
+async def find_eligible_images_for_date(conn: asyncpg.Connection, month_day: str, device_uuid: str):
     """
     For a given month_day, return up to IMAGE_FALLBACK_LIMIT images that haven't been
-    shown recently.
+    shown recently on the specified device.
     """
     images = await query_images_by_month_day(conn, month_day)
     threshold_date = (datetime.now() - timedelta(days=IMAGE_REPEAT_THRESHOLD)).date()
     eligible = []
     for img in images:
-        if not await check_image_displayed_recently(conn, img["uuid"], threshold_date):
+        if not await check_image_displayed_recently(conn, img["uuid"], device_uuid, threshold_date):
             eligible.append(img)
         if len(eligible) >= IMAGE_FALLBACK_LIMIT:
             break
     return eligible
 
-async def find_images_for_today_and_fallback(conn: asyncpg.Connection):
+async def find_images_for_today_and_fallback(conn: asyncpg.Connection, device_uuid: str):
     """
-    Attempt to find images for today's date (by month-day).
+    Attempt to find images for today's date (by month-day) that haven't been displayed
+    recently on the specific device.
       - If found, return all images for that date.
       - If no images for today, fallback to previous days (up to IMAGE_FALLBACK_SEARCH_DAYS)
         and return images not displayed recently.
@@ -91,7 +94,7 @@ async def find_images_for_today_and_fallback(conn: asyncpg.Connection):
     for i in range(1, IMAGE_FALLBACK_SEARCH_DAYS + 1):
         fallback_date = today - timedelta(days=i)
         fallback_md = fallback_date.strftime("%m-%d")
-        fallback_images = await find_eligible_images_for_date(conn, fallback_md)
+        fallback_images = await find_eligible_images_for_date(conn, fallback_md, device_uuid)
         if fallback_images:
             random.shuffle(fallback_images)
             return fallback_images, True
@@ -220,7 +223,7 @@ async def process_daily_image(conn: asyncpg.Connection, device_uuid: str = "0") 
     Use the advanced daily logic to pick a daily image (with fallback if needed),
     fetch it, overlay the date text, log the display event, and return the BMP image bytes.
     """
-    images, fallback_used = await find_images_for_today_and_fallback(conn)
+    images, fallback_used = await find_images_for_today_and_fallback(conn, device_uuid)
     if not images:
         image_url = DEFAULT_FALLBACK_IMAGE
         image_date = datetime.now()

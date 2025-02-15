@@ -10,6 +10,7 @@
 #include <ArduinoJson.h>
 #include <Inkplate.h>
 #include <esp_sleep.h>
+#include <HTTPUpdate.h>
 
 // Create Inkplate object
 Inkplate display;
@@ -18,6 +19,11 @@ Inkplate display;
 Preferences preferences;
 AsyncWebServer server(80);
 DNSServer dnsServer;
+
+// OTA configuration
+const char* currentFirmwareVersion = "1.0";  // Current firmware version
+const char* versionCheckURL = "https://s3.us-west-1.amazonaws.com/bjork.love/fridge-thing-firmware/version.txt";
+const char* firmwareURL = "https://s3.us-west-1.amazonaws.com/bjork.love/fridge-thing-firmware/firmware.ino.bin";
 
 // Access Point settings
 const char *apSSID = "FridgeThing";
@@ -98,9 +104,6 @@ float voltageToPercent(float voltage) {
  * Download a file (BMP) from 'imageUrl' using WiFiClient
  * and store it on the SD card at 'localPath' (e.g. "/temp.bmp")
  * using SdFat's SdFile. Return true if successful, false otherwise.
- *
- * Updated: This version adds a timeout mechanism to break out of the loop
- *          if no new data is received for 10 seconds.
  */
 bool downloadToSD(const String &imageUrl, const String &localPath, WiFiClient &client)
 {
@@ -189,7 +192,7 @@ void fetchAndDisplayImage() {
     http.addHeader("Content-Type", "application/json");
 
     StaticJsonDocument<256> doc;
-    doc["current_fw_ver"] = "0.1";
+    doc["current_fw_ver"] = currentFirmwareVersion;
     String body;
     serializeJson(doc, body);
 
@@ -215,7 +218,6 @@ void fetchAndDisplayImage() {
     String imageUrl    = respDoc["image_url"].as<String>();
     long   nextWakeSec = respDoc["next_wake_secs"].as<long>();
 
-    // --- Firmware change: Ensure the image URL uses HTTPS ---
     if (imageUrl.startsWith("http://")) {
         imageUrl.replace("http://", "https://");
     }
@@ -265,6 +267,55 @@ void fetchAndDisplayImage() {
 }
 
 /**
+ * Check for OTA firmware updates.
+ *
+ * This function makes an HTTPS request to fetch the latest firmware version.
+ * If it differs from the current version, it triggers an OTA update using the ESP32's
+ * built-in HTTPUpdate library.
+ *
+ * Note: OTA updates require an active Internet connection.
+ */
+void checkOTAUpdate() {
+    Serial.println("Checking for OTA firmware update...");
+    WiFiClientSecure client;
+    client.setInsecure();  // For simplicity; for production, set up proper certificate validation.
+    
+    HTTPClient http;
+    http.setTimeout(10000);
+    if (http.begin(client, versionCheckURL)) {
+        int httpCode = http.GET();
+        if (httpCode == 200) {
+            String newVersion = http.getString();
+            newVersion.trim();
+            Serial.println("Latest firmware version available: " + newVersion);
+            if (newVersion != String(currentFirmwareVersion)) {
+                Serial.println("New firmware version available. Starting OTA update...");
+                // Trigger OTA update using the firmware binary URL.
+                t_httpUpdate_return ret = httpUpdate.update(client, firmwareURL);
+                switch(ret) {
+                    case HTTP_UPDATE_FAILED:
+                        Serial.printf("HTTP_UPDATE_FAILED Error (%d): %s\n", httpUpdate.getLastError(), httpUpdate.getLastErrorString().c_str());
+                        break;
+                    case HTTP_UPDATE_NO_UPDATES:
+                        Serial.println("No OTA update available (unexpected).");
+                        break;
+                    case HTTP_UPDATE_OK:
+                        // On success, the device will reboot automatically.
+                        break;
+                }
+            } else {
+                Serial.println("Firmware is up-to-date.");
+            }
+        } else {
+            Serial.printf("Failed to check version, HTTP GET code: %d\n", httpCode);
+        }
+        http.end();
+    } else {
+        Serial.println("Failed to initiate HTTP connection for OTA version check.");
+    }
+}
+
+/**
  * Setup: Initialize SD, connect Wi-Fi, start captive portal if needed.
  */
 void setup() {
@@ -294,7 +345,7 @@ void setup() {
         display.display();
     }
 
-    // Attempt Wi-Fi connection
+    // Attempt Wi-Fi connection using stored credentials
     if (storedSSID != "") {
         WiFi.mode(WIFI_STA);
         WiFi.begin(storedSSID.c_str(), storedPass.c_str());
@@ -311,18 +362,20 @@ void setup() {
             Serial.print("IP: ");
             Serial.println(WiFi.localIP());
 
-            // Immediately fetch and display image
+            // Check for OTA update immediately after Wi-Fi connects.
+            checkOTAUpdate();
+            // If no OTA update is triggered (or after update failure), continue with normal operation.
             fetchAndDisplayImage();
             return;
         }
     }
 
-    // If Wi-Fi fails, start the captive portal
+    // If Wi-Fi fails, start the captive portal.
     startCaptivePortal();
 }
 
 /**
- * Start captive portal if no Wi-Fi credentials exist or connect fails.
+ * Start captive portal if no Wi-Fi credentials exist or connection fails.
  */
 void startCaptivePortal() {
     Serial.println("\nStarting Captive Portal...");
@@ -337,7 +390,7 @@ void startCaptivePortal() {
     display.print("Wi-Fi Setup");
     display.setTextSize(2);
     display.setCursor(10, 80);
-    display.print("Connect to 'FridgeThing'");
+    display.print(" the wi-fi network 'FridgeThing'");
     display.setCursor(10, 120);
     display.print("Visit: http://fridgething.local/");
     display.display();
@@ -405,7 +458,7 @@ void loop() {
     // If in AP mode, check if user took too long
     if (WiFi.getMode() == WIFI_AP && captivePortalStartTime > 0) {
         unsigned long elapsed = millis() - captivePortalStartTime;
-        if (elapsed >= 300000UL) {  // 5 minutes
+        if (elapsed >= CAPTIVE_PORTAL_TIMEOUT_MS) {  // 5 minutes
             Serial.println("No Wi-Fi config received; going to deep sleep...");
 
             // Sleep for 30 seconds (or any appropriate fallback)
