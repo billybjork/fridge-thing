@@ -21,7 +21,7 @@ AsyncWebServer server(80);
 DNSServer dnsServer;
 
 // OTA configuration
-const char* currentFirmwareVersion = "1.0";  // Current firmware version
+const char* currentFirmwareVersion = "1.1";  // Current firmware version
 const char* versionCheckURL = "https://s3.us-west-1.amazonaws.com/bjork.love/fridge-thing-firmware/version.txt";
 const char* firmwareURL = "https://s3.us-west-1.amazonaws.com/bjork.love/fridge-thing-firmware/firmware.ino.bin";
 
@@ -262,7 +262,10 @@ void fetchAndDisplayImage() {
 
     // 4) Deep sleep
     Serial.printf("Going to deep sleep for %ld seconds...\n", nextWakeSec);
+    // Enable timer wakeup for the next scheduled image update.
     esp_sleep_enable_timer_wakeup(nextWakeSec * 1000000ULL);
+    // Enable external wakeup from the Inkplate wake button (GPIO 36).
+    esp_sleep_enable_ext0_wakeup(GPIO_NUM_36, 0);
     esp_deep_sleep_start();
 }
 
@@ -335,8 +338,9 @@ void setup() {
     }
 
     // Only display booting screen on a cold start.
-    // If waking from deep sleep (timer wakeup), skip booting to allow a seamless image refresh.
-    if (esp_sleep_get_wakeup_cause() != ESP_SLEEP_WAKEUP_TIMER) {
+    // If waking from deep sleep (timer or ext0 wakeup), skip booting to allow a seamless image refresh.
+    if (esp_sleep_get_wakeup_cause() != ESP_SLEEP_WAKEUP_TIMER &&
+        esp_sleep_get_wakeup_cause() != ESP_SLEEP_WAKEUP_EXT0) {
         display.clearDisplay();
         display.setTextColor(BLACK);
         display.setTextSize(4);
@@ -463,6 +467,8 @@ void loop() {
 
             // Sleep for 30 seconds (or any appropriate fallback)
             esp_sleep_enable_timer_wakeup(30ULL * 1000000ULL);
+            // Enable external wakeup via the Inkplate wake button (GPIO 36)
+            esp_sleep_enable_ext0_wakeup(GPIO_NUM_36, 0);
             display.clearDisplay();
             display.setCursor(10, 50);
             display.setTextSize(2);
