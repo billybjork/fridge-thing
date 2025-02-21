@@ -1,6 +1,9 @@
 # Use the official Playwright Python image pinned to a specific version
 FROM mcr.microsoft.com/playwright/python:v1.50.0-jammy
 
+# Install tzdata for zoneinfo support
+RUN apt-get update && apt-get install -y tzdata && rm -rf /var/lib/apt/lists/*
+
 # Create a directory for your app
 WORKDIR /app
 
