@@ -2,6 +2,7 @@ import os
 import io
 import random
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import aiohttp
 import asyncpg
@@ -14,6 +15,8 @@ router = APIRouter()
 # ==============================================================================
 # Daily Channel Logic
 # ==============================================================================
+
+CST = ZoneInfo("America/Chicago")
 
 # ----- Configuration for Daily Channel -----
 TARGET_RESOLUTION = (600, 448)
@@ -65,7 +68,7 @@ async def find_eligible_images_for_date(conn: asyncpg.Connection, month_day: str
     shown recently on the specified device.
     """
     images = await query_images_by_month_day(conn, month_day)
-    threshold_date = (datetime.now() - timedelta(days=IMAGE_REPEAT_THRESHOLD)).date()
+    threshold_date = (datetime.now(CST) - timedelta(days=IMAGE_REPEAT_THRESHOLD)).date()
     eligible = []
     for img in images:
         if not await check_image_displayed_recently(conn, img["uuid"], device_uuid, threshold_date):
@@ -83,7 +86,7 @@ async def find_images_for_today_and_fallback(conn: asyncpg.Connection, device_uu
         and return images not displayed recently.
     Returns a tuple (list_of_images, fallback_used_bool).
     """
-    today = datetime.now()
+    today = datetime.now(CST)
     today_md = today.strftime("%m-%d")
     today_images = await query_images_by_month_day(conn, today_md)
 
@@ -168,7 +171,7 @@ def overlay_date_text(image, date_obj: datetime, fallback_used: bool) -> 'Image.
 
     # Determine the texts based on whether fallback is in use.
     if fallback_used:
-        today = datetime.now()
+        today = datetime.now(CST)
         formatted_date = format_date_ordinal(today)
         formatted_date = f"*{formatted_date}"
         current_year = today.year
@@ -226,7 +229,7 @@ async def process_daily_image(conn: asyncpg.Connection, device_uuid: str = "0") 
     images, fallback_used = await find_images_for_today_and_fallback(conn, device_uuid)
     if not images:
         image_url = DEFAULT_FALLBACK_IMAGE
-        image_date = datetime.now()
+        image_date = datetime.now(CST)
         image_uuid = None  # Nothing to log in this case.
     else:
         chosen = random.choice(images)
@@ -271,7 +274,7 @@ async def log_image_displayed(conn: asyncpg.Connection, uuid_val: str, device_uu
     Log that an image was displayed by inserting a record into display_logs.
     device_uuid defaults to "0" if not provided.
     """
-    display_date = datetime.now().date()
+    display_date = datetime.now(CST).date()
     # Convert uuid_val to string before passing it in.
     await conn.execute(
         """

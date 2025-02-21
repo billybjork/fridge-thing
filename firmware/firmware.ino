@@ -394,9 +394,9 @@ void startCaptivePortal() {
     display.print("Wi-Fi Setup");
     display.setTextSize(2);
     display.setCursor(10, 80);
-    display.print(" the wi-fi network 'FridgeThing'");
+    display.print("Connect to the wi-fi network 'FridgeThing'");
     display.setCursor(10, 120);
-    display.print("Visit: http://fridgething.local/");
+    display.print("If not prompted automatically, visit: http://fridgething.local/");
     display.display();
 
     // Start DNS redirection
