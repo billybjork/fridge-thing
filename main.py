@@ -127,12 +127,13 @@ async def get_display(
             if channel_row:
                 channel_key = channel_row["channel_key"]
 
-        # For 'daily' and 'random' channels, use dedicated endpoints.
+        # For 'daily', 'random', and 'nts-now-playing' channels, use dedicated endpoints.
         if channel_key == "daily":
-            # Convert URL object to string then append query parameters
             image_url = str(request.url_for("convert_daily")) + f"?device_uuid={device_uuid}"
         elif channel_key == "random":
             image_url = str(request.url_for("convert_random")) + f"?device_uuid={device_uuid}"
+        elif channel_key == "nts-now-playing":
+            image_url = str(request.url_for("convert_nts_now_playing")) + f"?device_uuid={device_uuid}"
         else:
             # For any other channel, fallback to the default handler.
             image_url = await fallback_image_handler(conn)
@@ -205,6 +206,7 @@ async def convert_image(url: str):
 # Import channel routers from the subfolder.
 from channels.daily_channel import router as daily_router
 from channels.random_channel import router as random_router
+from channels.nts_now_playing_channel import router as nts_router
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -219,6 +221,7 @@ app = FastAPI(title="Fridge Thing API", lifespan=lifespan)
 app.include_router(router)
 app.include_router(daily_router)
 app.include_router(random_router)
+app.include_router(nts_router)
 
 # ------------------------------------------------------------------------------
 # Entry Point
