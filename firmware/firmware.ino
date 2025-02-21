@@ -21,7 +21,7 @@ AsyncWebServer server(80);
 DNSServer dnsServer;
 
 // OTA configuration
-const char* currentFirmwareVersion = "1.1";  // Current firmware version
+const char* currentFirmwareVersion = "1.2";  // Current firmware version
 const char* versionCheckURL = "https://s3.us-west-1.amazonaws.com/bjork.love/fridge-thing-firmware/version.txt";
 const char* firmwareURL = "https://s3.us-west-1.amazonaws.com/bjork.love/fridge-thing-firmware/firmware.ino.bin";
 

@@ -13,6 +13,8 @@ import numpy as np
 from PIL import Image, ImageOps
 from fastapi.responses import Response as FastAPIResponse
 from urllib.parse import urlencode
+from datetime import datetime, time, timedelta
+import pytz
 
 # ------------------------------------------------------------------------------
 # Configuration
@@ -97,6 +99,23 @@ async def get_display(
     async with pool.acquire() as conn:
         device_row = await get_or_create_device(conn, device_uuid)
         device_id = device_row["id"]
+
+        # ----------------------------------------------------------------------
+        # No-Refresh Period Check (Midnight to 8am CST)
+        # ----------------------------------------------------------------------
+        cst = pytz.timezone("America/Chicago")
+        now_cst = datetime.now(cst)
+        if now_cst.time() >= time(0, 0) and now_cst.time() < time(8, 0):
+            # Calculate seconds until 8:00 am CST
+            target_time = datetime.combine(now_cst.date(), time(8, 0), tzinfo=cst)
+            # In case current time is already past 8am (should not happen here)
+            if now_cst >= target_time:
+                target_time += timedelta(days=1)
+            next_wake_secs = int((target_time - now_cst).total_seconds())
+            # Instead of refreshing the display overnight, instruct the device
+            # to sleep until the no-refresh period ends.
+            # The sentinel value "NO_REFRESH" should be handled by the firmware.
+            return DeviceDisplayResponse(image_url="NO_REFRESH", next_wake_secs=next_wake_secs)
 
         # Retrieve channel information
         channel_id = device_row.get("channel_id")
