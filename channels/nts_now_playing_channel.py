@@ -1,6 +1,7 @@
 import os
 import io
 import aiohttp
+import textwrap
 from fastapi import APIRouter, Request, Response
 from PIL import Image, ImageOps, ImageDraw, ImageFont
 from bs4 import BeautifulSoup
@@ -17,163 +18,166 @@ router = APIRouter()
 
 def get_default_font(size):
     try:
-        # Try loading a truetype font from system (or provide a path to your font)
+        # Adjust the font path if needed
         return ImageFont.truetype("arial.ttf", size)
     except Exception:
-        # Fallback to default PIL font if not available
         return ImageFont.load_default()
 
-def render_channels_image(channels):
+async def fetch_image(session, url):
+    try:
+        async with session.get(url) as resp:
+            if resp.status == 200:
+                data = await resp.read()
+                return Image.open(io.BytesIO(data)).convert("RGB")
+    except Exception:
+        return None
+
+def render_channel_block(base_image, channel, block_box):
     """
-    Create a new image (600x448) and draw the channel information.
-    channels is a list of dictionaries containing channel info.
+    Render the channel content into the given block_box on base_image.
+    block_box is a tuple: (x, y, width, height)
     """
-    # Create a blank white image
-    image = Image.new("RGB", TARGET_RESOLUTION, "white")
-    draw = ImageDraw.Draw(image)
+    draw = ImageDraw.Draw(base_image)
+    x, y, w, h = block_box
+    margin = 5
+    current_y = y + margin
 
-    # Define some margins and spacing
-    margin = 10
-    y = margin
+    # Draw the header text (extracted from the header element)
+    header_font = get_default_font(18)
+    header_text = channel.get("header", "")
+    draw.text((x + margin, current_y), header_text, fill="black", font=header_font)
+    current_y += 25  # allocate space for the header
 
-    # Title
-    title_font = get_default_font(24)
-    draw.text((margin, y), "NTS Live - Now Playing", fill="black", font=title_font)
-    y += 30
+    # If an image is available (extracted from the button's <img>), paste it
+    if channel.get("image"):
+        ch_img = channel["image"].copy()
+        # Resize the image to fit into a 100x100 area
+        ch_img.thumbnail((100, 100))
+        base_image.paste(ch_img, (x + margin, current_y))
+    # Define x position for the details text (to the right of the image if it exists)
+    text_x = x + margin + 110 if channel.get("image") else x + margin
+    text_width = w - (110 if channel.get("image") else 0) - 2 * margin
 
-    # For each channel, draw its details
-    for ch in channels:
-        # Draw a separator line between channels
-        if y > margin + 30:
-            draw.line((margin, y, TARGET_RESOLUTION[0]-margin, y), fill="grey", width=1)
-            y += 5
-
-        # Channel number and location (bold)
-        header_font = get_default_font(20)
-        header_text = f"Channel {ch.get('number', '?')} - {ch.get('location', '')}"
-        draw.text((margin, y), header_text, fill="black", font=header_font)
-        y += 25
-
-        # Broadcast times
-        times_font = get_default_font(16)
-        times_text = f"Times: {ch.get('times', 'N/A')}"
-        draw.text((margin, y), times_text, fill="black", font=times_font)
-        y += 20
-
-        # Program title
-        prog_font = get_default_font(18)
-        prog_text = f"Show: {ch.get('title', 'N/A')}"
-        draw.text((margin, y), prog_text, fill="black", font=prog_font)
-        y += 25
-
-        # Broadcast description (wrap if too long)
-        desc_font = get_default_font(14)
-        desc_text = ch.get("description", "")
-        # Simple text wrap: split into lines of at most 50 characters
-        lines = []
-        words = desc_text.split()
-        line = ""
-        for word in words:
-            if len(line) + len(word) + 1 <= 50:
-                line += (" " if line else "") + word
-            else:
-                lines.append(line)
-                line = word
-        if line:
-            lines.append(line)
-        for l in lines:
-            draw.text((margin, y), l, fill="black", font=desc_font)
-            y += 18
-
-        y += 10  # space between channels
-
-        # Stop if running out of space
-        if y > TARGET_RESOLUTION[1] - 40:
-            break
-
-    return image
+    # Draw the details text (extracted from the details element), wrapped as needed.
+    details_font = get_default_font(14)
+    details_text = channel.get("details", "")
+    # Estimate a max character count per line (roughly) based on available width.
+    max_chars = text_width // 7  
+    wrapped_text = textwrap.fill(details_text, width=max_chars)
+    draw.text((text_x, current_y), wrapped_text, fill="black", font=details_font)
 
 @router.get("/api/nts_now_playing_convert", name="convert_nts_now_playing")
 async def convert_nts_now_playing(request: Request, device_uuid: str = "0"):
     """
-    Fetch the NTS.live homepage, scrape the specific channels section, reconstruct a custom
-    image with the key channel details tailored for the 600x448 inkplate display.
+    Fetch the NTS.live homepage, extract the following elements:
+      - For channel 1: 
+          header:   "#nts-live-header > div.live-header__channels--expanded.live-header__channels > div:nth-child(1) > header"
+          image:    "#nts-live-header > div.live-header__channels--expanded.live-header__channels > div:nth-child(1) > div.live-channel__content > div.live-channel__content__picture > button" (grab first <img>)
+          details:  "#nts-live-header > div.live-header__channels--expanded.live-header__channels > div:nth-child(1) > div.live-channel__content > div.live-channel__content__details"
+      - For channel 2:
+          header:   "#nts-live-header > div.live-header__channels--expanded.live-header__channels > div.live-channel.channel-2 > header"
+          image:    "#nts-live-header > div.live-header__channels--expanded.live-header__channels > div.live-channel.channel-2 > div.live-channel__content > div.live-channel__content__picture > button" (grab first <img>)
+          details:  "#nts-live-header > div.live-header__channels--expanded.live-header__channels > div.live-channel.channel-2 > div.live-channel__content > div.live-channel__content__details"
+
+    These extracted contents are reassembled to fit the 600x448 display.
     """
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(PAGE_URL) as resp:
                 if resp.status != 200:
-                    raise Exception("Page fetch error")
+                    raise Exception("Failed to fetch page")
                 html_content = await resp.text()
-    except Exception as e:
-        # On exception, fallback to the default fallback image.
+    except Exception:
+        # Fallback to default image if fetching fails.
         async with aiohttp.ClientSession() as session:
             async with session.get(DEFAULT_FALLBACK_IMAGE) as fallback_resp:
-                image_bytes = await fallback_resp.read()
-        image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-        # Standard processing below:
-        if image.height > image.width:
-            image = image.rotate(90, expand=True)
-        image = ImageOps.contain(image, TARGET_RESOLUTION)
-        if image.size != TARGET_RESOLUTION:
-            image = fill_letterbox(image, *TARGET_RESOLUTION)
+                data = await fallback_resp.read()
+        fallback_img = Image.open(io.BytesIO(data)).convert("RGB")
+        if fallback_img.height > fallback_img.width:
+            fallback_img = fallback_img.rotate(90, expand=True)
+        fallback_img = ImageOps.contain(fallback_img, TARGET_RESOLUTION)
+        if fallback_img.size != TARGET_RESOLUTION:
+            fallback_img = fill_letterbox(fallback_img, *TARGET_RESOLUTION)
         output_buffer = io.BytesIO()
-        image.save(output_buffer, format="BMP")
+        fallback_img.save(output_buffer, format="BMP")
         return Response(content=output_buffer.getvalue(), media_type="image/bmp")
 
-    # Parse HTML with BeautifulSoup
+    # Parse the HTML using BeautifulSoup
     soup = BeautifulSoup(html_content, "html.parser")
-    # Use the provided CSS selector
     container = soup.select_one("#nts-live-header > div.live-header__channels--expanded.live-header__channels")
-    
-    channels_data = []
-    if container:
-        # Find all direct channel entries (div with class "live-channel")
-        channel_divs = container.find_all("div", class_="live-channel")
-        for div in channel_divs:
-            ch_info = {}
-            # Channel number: look for span with class "channel-icon"
-            num_tag = div.find("span", class_="channel-icon")
-            ch_info["number"] = num_tag.get_text(strip=True) if num_tag else "?"
-            # Broadcast location: span with class "broadcast-location"
-            loc_tag = div.find("span", class_="broadcast-location")
-            ch_info["location"] = loc_tag.get_text(strip=True) if loc_tag else ""
-            # Broadcast times: element with class "live-channel__header__broadcast-times"
-            times_tag = div.find("span", class_="live-channel__header__broadcast-times")
-            ch_info["times"] = times_tag.get_text(strip=True) if times_tag else "N/A"
-            # Show title: h3 with class "broadcast-heading"
-            title_tag = div.find("h3", class_="broadcast-heading")
-            ch_info["title"] = title_tag.get_text(strip=True) if title_tag else "N/A"
-            # Description: p with class "broadcast-description"
-            desc_tag = div.find("p", class_="broadcast-description")
-            ch_info["description"] = desc_tag.get_text(strip=True) if desc_tag else ""
-            channels_data.append(ch_info)
-    else:
-        # If selector not found, fallback to default image
+    if not container:
+        # Fallback if the container is not found.
         async with aiohttp.ClientSession() as session:
             async with session.get(DEFAULT_FALLBACK_IMAGE) as fallback_resp:
-                image_bytes = await fallback_resp.read()
-        image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-        if image.height > image.width:
-            image = image.rotate(90, expand=True)
-        image = ImageOps.contain(image, TARGET_RESOLUTION)
-        if image.size != TARGET_RESOLUTION:
-            image = fill_letterbox(image, *TARGET_RESOLUTION)
+                data = await fallback_resp.read()
+        fallback_img = Image.open(io.BytesIO(data)).convert("RGB")
+        if fallback_img.height > fallback_img.width:
+            fallback_img = fallback_img.rotate(90, expand=True)
+        fallback_img = ImageOps.contain(fallback_img, TARGET_RESOLUTION)
+        if fallback_img.size != TARGET_RESOLUTION:
+            fallback_img = fill_letterbox(fallback_img, *TARGET_RESOLUTION)
         output_buffer = io.BytesIO()
-        image.save(output_buffer, format="BMP")
+        fallback_img.save(output_buffer, format="BMP")
         return Response(content=output_buffer.getvalue(), media_type="image/bmp")
-    
-    # Build a new image based on the scraped channel info.
-    custom_image = render_channels_image(channels_data)
-    
-    # Standard processing: rotate if needed, resize/letterbox if not exactly TARGET_RESOLUTION.
-    if custom_image.height > custom_image.width:
-        custom_image = custom_image.rotate(90, expand=True)
-    custom_image = ImageOps.contain(custom_image, TARGET_RESOLUTION)
-    if custom_image.size != TARGET_RESOLUTION:
-        custom_image = fill_letterbox(custom_image, *TARGET_RESOLUTION)
-    
-    # Save processed image to BMP and return.
+
+    channels = []
+
+    # --- Channel 1 ---
+    first_channel = container.select_one("div:nth-child(1)")
+    if first_channel:
+        header_el = first_channel.select_one("header")
+        picture_el = first_channel.select_one("div.live-channel__content > div.live-channel__content__picture > button")
+        details_el = first_channel.select_one("div.live-channel__content > div.live-channel__content__details")
+        header_text = header_el.get_text(" ", strip=True) if header_el else ""
+        details_text = details_el.get_text(" ", strip=True) if details_el else ""
+        img_tag = picture_el.find("img") if picture_el else None
+        img_url = img_tag["src"] if img_tag and img_tag.has_attr("src") else None
+        channels.append({
+            "header": header_text,
+            "details": details_text,
+            "image_url": img_url
+        })
+
+    # --- Channel 2 ---
+    second_channel = container.select_one("div.live-channel.channel-2")
+    if second_channel:
+        header_el = second_channel.select_one("header")
+        picture_el = second_channel.select_one("div.live-channel__content > div.live-channel__content__picture > button")
+        details_el = second_channel.select_one("div.live-channel__content > div.live-channel__content__details")
+        header_text = header_el.get_text(" ", strip=True) if header_el else ""
+        details_text = details_el.get_text(" ", strip=True) if details_el else ""
+        img_tag = picture_el.find("img") if picture_el else None
+        img_url = img_tag["src"] if img_tag and img_tag.has_attr("src") else None
+        channels.append({
+            "header": header_text,
+            "details": details_text,
+            "image_url": img_url
+        })
+
+    # Download images for each channel (if available)
+    async with aiohttp.ClientSession() as session:
+        for channel in channels:
+            if channel.get("image_url"):
+                img = await fetch_image(session, channel["image_url"])
+                channel["image"] = img
+
+    # Create a new base image for the display.
+    base_image = Image.new("RGB", TARGET_RESOLUTION, "white")
+    # Allocate vertical blocks for each channel (assume two channels).
+    channel_height = TARGET_RESOLUTION[1] // 2
+    block1 = (0, 0, TARGET_RESOLUTION[0], channel_height)
+    block2 = (0, channel_height, TARGET_RESOLUTION[0], TARGET_RESOLUTION[1] - channel_height)
+    if len(channels) > 0:
+        render_channel_block(base_image, channels[0], block1)
+    if len(channels) > 1:
+        render_channel_block(base_image, channels[1], block2)
+
+    # Final processing: rotate if needed, then ensure the image fits exactly the target resolution.
+    if base_image.height > base_image.width:
+        base_image = base_image.rotate(90, expand=True)
+    base_image = ImageOps.contain(base_image, TARGET_RESOLUTION)
+    if base_image.size != TARGET_RESOLUTION:
+        base_image = fill_letterbox(base_image, *TARGET_RESOLUTION)
     output_buffer = io.BytesIO()
-    custom_image.save(output_buffer, format="BMP")
+    base_image.save(output_buffer, format="BMP")
     return Response(content=output_buffer.getvalue(), media_type="image/bmp")
