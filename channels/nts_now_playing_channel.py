@@ -21,7 +21,7 @@ async def convert_nts_now_playing(request: Request, device_uuid: str = "0"):
     and applies the standard processing (rotate, resize, letterbox) to produce a BMP image.
     """
     # URL of screenshot service capturing the NTS live page.
-    screenshot_url = "https://image.thum.io/get/https://www.nts.live/"
+    screenshot_url = "https://image.thum.io/get/png/https://www.nts.live/?fresh=true"
     
     try:
         async with aiohttp.ClientSession() as session:
