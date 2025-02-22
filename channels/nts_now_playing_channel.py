@@ -11,8 +11,8 @@ from playwright.async_api import async_playwright, TimeoutError as PlaywrightTim
 router = APIRouter()
 
 # Adjust these constants as needed.
-TARGET_WIDTH = 448
-TARGET_HEIGHT = 600
+TARGET_WIDTH = 600
+TARGET_HEIGHT = 448
 
 @router.get("/api/nts_now_playing", name="convert_nts_now_playing")
 async def convert_nts_now_playing(request: Request):
@@ -25,7 +25,7 @@ async def convert_nts_now_playing(request: Request):
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True)
             page = await browser.new_page(
-                viewport={"width": TARGET_WIDTH, "height": 1000}  # Height is arbitrary; we'll crop later
+                viewport={"width": TARGET_WIDTH, "height": 800}  # Height is arbitrary; we'll crop later
             )
 
             # 1. Go to NTS.live
