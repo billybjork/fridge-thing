@@ -14,8 +14,8 @@ router = APIRouter()
 # Random Channel Logic
 # ==============================================================================
 
-# ----- Configuration for Random Channel -----
-TARGET_RESOLUTION = (600, 448)
+DEFAULT_WIDTH = 600
+DEFAULT_HEIGHT = 448
 DEFAULT_FALLBACK_IMAGE = "https://s3.us-west-1.amazonaws.com/bjork.love/21977917882_ffae88748b_o.bmp"
 
 async def get_random_image_url(conn: asyncpg.Connection) -> str:
@@ -28,14 +28,15 @@ async def get_random_image_url(conn: asyncpg.Connection) -> str:
     )
     return row["image_proxy_s3_object_url"] if row else DEFAULT_FALLBACK_IMAGE
 
-async def process_random_image(conn: asyncpg.Connection) -> bytes:
+async def process_random_image(conn: asyncpg.Connection, width: int = DEFAULT_WIDTH, height: int = DEFAULT_HEIGHT) -> bytes:
     """
     Use the random channel logic to select a random image,
     fetch it, process it (rotate, resize, letterbox), and return BMP image bytes.
+    The image is resized and letterboxed to the provided width and height.
     """
     image_url = await get_random_image_url(conn)
 
-    # Fetch the image using aiohttp
+    # Fetch the image using aiohttp.
     async with aiohttp.ClientSession() as session:
         async with session.get(image_url) as resp:
             if resp.status != 200:
@@ -57,11 +58,11 @@ async def process_random_image(conn: asyncpg.Connection) -> bytes:
         image = image.rotate(90, expand=True)
 
     # Resize the image while maintaining aspect ratio.
-    image = ImageOps.contain(image, TARGET_RESOLUTION)
+    image = ImageOps.contain(image, (width, height))
 
     # If the resized image doesn't exactly match the target resolution, apply letterboxing.
-    if image.size != TARGET_RESOLUTION:
-        image = fill_letterbox(image, TARGET_RESOLUTION[0], TARGET_RESOLUTION[1])
+    if image.size != (width, height):
+        image = fill_letterbox(image, width, height)
 
     # Convert to BMP bytes.
     output_buffer = io.BytesIO()
@@ -69,11 +70,12 @@ async def process_random_image(conn: asyncpg.Connection) -> bytes:
     return output_buffer.getvalue()
 
 @router.get("/api/random_convert", name="convert_random")
-async def convert_random(request: Request):
+async def convert_random(request: Request, width: int = DEFAULT_WIDTH, height: int = DEFAULT_HEIGHT):
     """
     Endpoint that uses the random channel logic to produce a BMP image.
+    Accepts optional query parameters 'width' and 'height' to dynamically adapt the image.
     """
     pool = request.app.state.pool
     async with pool.acquire() as conn:
-        bmp_data = await process_random_image(conn)
+        bmp_data = await process_random_image(conn, width, height)
     return Response(content=bmp_data, media_type="image/bmp")

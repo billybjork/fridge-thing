@@ -21,7 +21,8 @@ router = APIRouter()
 CST = ZoneInfo("America/Chicago")
 
 # ----- Configuration for Daily Channel -----
-TARGET_RESOLUTION = (600, 448)
+DEFAULT_WIDTH = 600
+DEFAULT_HEIGHT = 448
 IMAGE_REPEAT_THRESHOLD = 10       # in days
 IMAGE_FALLBACK_SEARCH_DAYS = 30     # how many days back we look for fallback images
 IMAGE_FALLBACK_LIMIT = 5            # how many images we pick for fallback scenario
@@ -58,7 +59,7 @@ async def check_image_displayed_recently(conn: asyncpg.Connection, uuid_val: str
         FROM display_logs
         WHERE uuid = $1 AND device_uuid = $2 AND display_date >= $3
         """,
-        str(uuid_val),  # Convert UUID to string
+        str(uuid_val),
         str(device_uuid),
         threshold_date,
     )
@@ -182,13 +183,10 @@ def overlay_date_text(image, date_obj: datetime, fallback_used: bool) -> 'Image.
     x_ya = margin
     y_ya = margin
 
-    # Dynamically choose text color based on image brightness ---
-    # Convert the image to grayscale and compute its average brightness.
+    # Dynamically choose text color based on image brightness.
     grayscale = image.convert("L")
     avg_brightness = np.mean(np.array(grayscale))
-    # If the image is dark, use white text; otherwise, use black text.
     text_color = "white" if avg_brightness < 128 else "black"
-    # ---------------------------------------------------------------------------
 
     # Draw the texts on the image.
     draw.text((x_md, y_md), month_day_text, fill=text_color, font=month_day_font)
@@ -196,10 +194,11 @@ def overlay_date_text(image, date_obj: datetime, fallback_used: bool) -> 'Image.
 
     return image
 
-async def process_daily_image(conn: asyncpg.Connection, device_uuid: str = "0") -> bytes:
+async def process_daily_image(conn: asyncpg.Connection, device_uuid: str = "0", width: int = DEFAULT_WIDTH, height: int = DEFAULT_HEIGHT) -> bytes:
     """
     Use the advanced daily logic to pick a daily image (with fallback if needed),
     fetch it, overlay the date text, log the display event, and return the BMP image bytes.
+    The image is resized and letterboxed to the provided width and height.
     """
     images, fallback_used = await find_images_for_today_and_fallback(conn, device_uuid)
     if not images:
@@ -224,12 +223,12 @@ async def process_daily_image(conn: asyncpg.Connection, device_uuid: str = "0") 
     try:
         image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
     except Exception:
-        image = Image.new("RGB", TARGET_RESOLUTION, (255, 255, 255))
+        image = Image.new("RGB", (width, height), (255, 255, 255))
 
-    # Resize and letterbox.
-    image = ImageOps.contain(image, TARGET_RESOLUTION)
-    if image.size != TARGET_RESOLUTION:
-        image = fill_letterbox(image, TARGET_RESOLUTION[0], TARGET_RESOLUTION[1])
+    # Resize and letterbox to dynamic resolution.
+    image = ImageOps.contain(image, (width, height))
+    if image.size != (width, height):
+        image = fill_letterbox(image, width, height)
 
     # Overlay date text.
     image = overlay_date_text(image, image_date, fallback_used)
@@ -250,7 +249,6 @@ async def log_image_displayed(conn: asyncpg.Connection, uuid_val: str, device_uu
     device_uuid defaults to "0" if not provided.
     """
     display_date = datetime.now(CST).date()
-    # Convert uuid_val to string before passing it in.
     await conn.execute(
         """
         INSERT INTO display_logs (uuid, display_date, device_uuid)
@@ -260,8 +258,12 @@ async def log_image_displayed(conn: asyncpg.Connection, uuid_val: str, device_uu
     )
 
 @router.get("/api/daily_convert", name="convert_daily")
-async def convert_daily(request: Request, device_uuid: str = "0"):
+async def convert_daily(request: Request, device_uuid: str = "0", width: int = DEFAULT_WIDTH, height: int = DEFAULT_HEIGHT):
+    """
+    Endpoint that uses the daily channel logic to produce a BMP image.
+    Accepts optional query parameters 'width' and 'height' to dynamically adapt the image.
+    """
     pool = request.app.state.pool
     async with pool.acquire() as conn:
-        bmp_data = await process_daily_image(conn, device_uuid)
+        bmp_data = await process_daily_image(conn, device_uuid, width, height)
     return Response(content=bmp_data, media_type="image/bmp")

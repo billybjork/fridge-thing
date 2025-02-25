@@ -12,6 +12,9 @@
 #include <esp_sleep.h>
 #include <HTTPUpdate.h>
 
+// RTC_DATA_ATTR makes this variable persist across deep sleep cycles
+RTC_DATA_ATTR int bootCount = 0;
+
 // Create Inkplate object
 Inkplate display;
 
@@ -118,7 +121,7 @@ float voltageToPercent(float voltage) {
 
 /**
  * Log an event to "log.txt" on the SD card with a timestamp.
- * Here, we use millis() as a simple timestamp.
+ * We use millis() as a simple timestamp.
  */
 void logEvent(const char* message) {
     if (!sdCardAvailable) {
@@ -126,7 +129,7 @@ void logEvent(const char* message) {
         return;
     }
     SdFile logFile;
-    // Open log file in append mode.
+    // Open the log file in append mode.
     if (!logFile.open("/log.txt", O_WRITE | O_CREAT | O_APPEND)) {
         Serial.println("ERROR: Could not open log file.");
         return;
@@ -138,8 +141,8 @@ void logEvent(const char* message) {
 
 /**
  * Update the display to show the current state message.
- * The overlay is shown only in transitional, error, or low-battery states.
- * When an image is successfully rendered, this function does nothing.
+ * The overlay is only shown in transitional, error, or low‑battery states.
+ * When an image is fully rendered, this function does nothing.
  */
 void updateStateDisplay(bool fullRefresh = true) {
     // Do not update the overlay when the image is fully displayed with no errors.
@@ -204,7 +207,8 @@ void updateStateDisplay(bool fullRefresh = true) {
 }
 
 /**
- * Set the current state and error code, store them persistently, update display (if needed), and log the event.
+ * Set the current state and error code, store them persistently, update the display (if needed),
+ * and log the event.
  */
 void setState(int newState, int newErrorCode = ERROR_NONE) {
     preferences.begin("state", false);
@@ -356,7 +360,8 @@ bool downloadToSD(const String &imageUrl, const String &localPath, WiFiClient &c
  * Fetch a BMP image from the server, save it to SD, render it, and then schedule deep sleep.
  * Battery information is included in the server request.
  * 
- * In normal operation, once the image is successfully rendered, no overlay is added.
+ * In normal operation, once the image is successfully rendered the overlay is not updated,
+ * leaving the image on screen.
  */
 void fetchAndDisplayImage() {
     setState(STATE_FETCHING_IMAGE);
@@ -467,8 +472,7 @@ void fetchAndDisplayImage() {
         return;
     }
     
-    // At this point, the image is fully rendered.
-    // We do not update the display with a "Sleeping..." overlay.
+    // At this point, the image is fully rendered and remains on screen.
     display.display();
     
     String sleepMsg = "Sleeping for " + String(nextWakeSec) + " seconds...";
@@ -480,11 +484,12 @@ void fetchAndDisplayImage() {
     preferences.putLong("nextWake", nextWakeSec);
     preferences.end();
     
+    // Enable timer wakeup for the next scheduled update.
     esp_sleep_enable_timer_wakeup(nextWakeSec * 1000000ULL);
+    // Enable external wakeup on GPIO36 (wake-up button).
     esp_sleep_enable_ext0_wakeup(GPIO_NUM_36, 0);
     
-    // Instead of calling setState(STATE_SLEEPING) which would update the display,
-    // we log the state and then immediately enter deep sleep.
+    // Log and enter deep sleep immediately (without updating the display).
     logEvent("Entering sleep mode.");
     delay(1000);
     esp_deep_sleep_start();
@@ -608,23 +613,42 @@ void startCaptivePortal() {
 }
 
 /**
- * Setup: initialize display, SD card, Wi-Fi, and state; decide whether to start normal operation or captive portal.
+ * Setup: initialize display, SD card, Wi-Fi, state, and decide whether to start normal operation or captive portal.
+ * Also, increment the boot count and log the wake-up cause so you can tell if the wake was manual (via button)
+ * or from the timer.
  */
 void setup() {
     Serial.begin(115200);
     Serial.println("\n\nFridge Thing starting up...");
     logEvent("Fridge Thing starting up...");
     
-    // Optionally restore previous state info.
-    preferences.begin("state", false);
-    int lastState = preferences.getInt("lastState", STATE_INITIALIZING);
-    int lastError = preferences.getInt("errorCode", ERROR_NONE);
-    preferences.end();
+    // Increment boot count (persistent across deep sleep)
+    bootCount++;
+    Serial.println("Boot count: " + String(bootCount));
+    logEvent(("Boot count: " + String(bootCount)).c_str());
+    
+    // Determine wakeup cause
+    esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
+    String wakeupMsg;
+    switch (wakeup_reason) {
+        case ESP_SLEEP_WAKEUP_EXT0:
+            wakeupMsg = "Wakeup caused by external button";
+            break;
+        case ESP_SLEEP_WAKEUP_TIMER:
+            wakeupMsg = "Wakeup caused by timer";
+            break;
+        default:
+            wakeupMsg = "Wakeup cause unknown";
+            break;
+    }
+    Serial.println(wakeupMsg);
+    logEvent(wakeupMsg.c_str());
     
     currentState = STATE_INITIALIZING;
     
     display.begin();
-    updateStateDisplay(); // Show initial status.
+    // Show initial state overlay (if needed)
+    updateStateDisplay();
     
     // Initialize SD card.
     sdCardAvailable = display.sdCardInit();
@@ -661,10 +685,9 @@ void setup() {
     preferences.end();
     
     // Check wakeup reason (cold boot vs. wake from sleep).
-    esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
     if (wakeup_reason == ESP_SLEEP_WAKEUP_TIMER || wakeup_reason == ESP_SLEEP_WAKEUP_EXT0) {
-        Serial.println("Woke from sleep");
-        logEvent("Woke from sleep");
+        Serial.println("Woke from deep sleep");
+        logEvent("Woke from deep sleep");
         if (storedSSID != "") {
             setState(STATE_CONNECTING_WIFI);
             WiFi.mode(WIFI_STA);
