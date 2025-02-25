@@ -34,7 +34,7 @@ SERVER_PORT = int(os.getenv("SERVER_PORT", 8000))
 # Default fallback image (used if no valid image is found)
 DEFAULT_FALLBACK_IMAGE = "https://s3.us-west-1.amazonaws.com/bjork.love/21977917882_ffae88748b_o.bmp"
 
-# Target resolution for display (Inkplate 6 Color)
+# Default target resolution (for legacy devices)
 TARGET_RESOLUTION = (600, 448)
 
 # ------------------------------------------------------------------------------
@@ -43,20 +43,24 @@ TARGET_RESOLUTION = (600, 448)
 
 async def get_or_create_device(conn: asyncpg.Connection, device_uuid: str) -> dict:
     """
-    Retrieve or create a device entry. Returns device data including channel_id.
+    Retrieve or create a device entry. Returns device data including channel_id and display resolution.
+    If a new device is created, default resolution is set to TARGET_RESOLUTION.
     """
     row = await conn.fetchrow(
         "SELECT * FROM devices WHERE device_uuid = $1", device_uuid
     )
     if not row:
         device_id = await conn.fetchval(
-            "INSERT INTO devices (device_uuid) VALUES ($1) RETURNING id", device_uuid
+            "INSERT INTO devices (device_uuid, display_width, display_height) VALUES ($1, $2, $3) RETURNING id",
+            device_uuid, TARGET_RESOLUTION[0], TARGET_RESOLUTION[1]
         )
         return {
             "id": device_id,
             "device_uuid": device_uuid,
             "channel_id": None,
             "next_wake_secs": 3600,
+            "display_width": TARGET_RESOLUTION[0],
+            "display_height": TARGET_RESOLUTION[1],
             "image_url": None
         }
     return dict(row)
@@ -81,7 +85,6 @@ class DeviceDisplayResponse(BaseModel):
 async def fallback_image_handler(conn: asyncpg.Connection) -> str:
     """
     Always returns the default fallback image URL.
-    Defined as async so we can 'await' it just like the other handlers.
     """
     return DEFAULT_FALLBACK_IMAGE
 
@@ -97,26 +100,31 @@ async def get_display(
     request_data: DeviceDisplayRequest, 
     request: Request
 ) -> DeviceDisplayResponse:
+    """
+    Endpoint for device display requests.
+    Retrieves device information (including display resolution) and returns an image URL
+    pointing to a conversion endpoint that dynamically adapts the image.
+    """
     pool = request.app.state.pool
     async with pool.acquire() as conn:
         device_row = await get_or_create_device(conn, device_uuid)
         device_id = device_row["id"]
 
-        # ----------------------------------------------------------------------
+        # Use device-specific display resolution or fallback to default
+        display_width = device_row.get("display_width") or TARGET_RESOLUTION[0]
+        display_height = device_row.get("display_height") or TARGET_RESOLUTION[1]
+
+        # ------------------------------------------------------------------------------
         # No-Refresh Period Check (Midnight to 8am CST)
-        # ----------------------------------------------------------------------
+        # ------------------------------------------------------------------------------
         cst = pytz.timezone("America/Chicago")
         now_cst = datetime.now(cst)
         if now_cst.time() >= time(0, 0) and now_cst.time() < time(8, 0):
             # Calculate seconds until 8:00 am CST
             target_time = datetime.combine(now_cst.date(), time(8, 0), tzinfo=cst)
-            # In case current time is already past 8am (should not happen here)
             if now_cst >= target_time:
                 target_time += timedelta(days=1)
             next_wake_secs = int((target_time - now_cst).total_seconds())
-            # Instead of refreshing the display overnight, instruct the device
-            # to sleep until the no-refresh period ends.
-            # The sentinel value "NO_REFRESH" should be handled by the firmware.
             return DeviceDisplayResponse(image_url="NO_REFRESH", next_wake_secs=next_wake_secs)
 
         # Retrieve channel information
@@ -127,27 +135,37 @@ async def get_display(
             if channel_row:
                 channel_key = channel_row["channel_key"]
 
-        # For 'daily', 'random', and 'nts-now-playing' channels, use dedicated endpoints.
+        # Build common query parameters (resolution parameters)
+        params = {"width": display_width, "height": display_height}
+
+        # For dedicated channels, include device_uuid and resolution parameters
         if channel_key == "daily":
-            image_url = str(request.url_for("convert_daily")) + f"?device_uuid={device_uuid}"
+            params["device_uuid"] = device_uuid
+            image_url = str(request.url_for("convert_daily")) + "?" + urlencode(params)
         elif channel_key == "random":
-            image_url = str(request.url_for("convert_random")) + f"?device_uuid={device_uuid}"
+            params["device_uuid"] = device_uuid
+            image_url = str(request.url_for("convert_random")) + "?" + urlencode(params)
         elif channel_key == "nts-now-playing":
-            image_url = str(request.url_for("convert_nts_now_playing")) + f"?device_uuid={device_uuid}"
+            params["device_uuid"] = device_uuid
+            image_url = str(request.url_for("convert_nts_now_playing")) + "?" + urlencode(params)
         else:
-            # For any other channel, fallback to the default handler.
-            image_url = await fallback_image_handler(conn)
-            convert_endpoint = str(request.url_for("convert_image"))
-            image_url = convert_endpoint + "?" + urlencode({"url": image_url})
+            # Fallback to default image conversion endpoint
+            fallback_url = await fallback_image_handler(conn)
+            params["url"] = fallback_url
+            image_url = str(request.url_for("convert_image")) + "?" + urlencode(params)
 
         return DeviceDisplayResponse(image_url=image_url, next_wake_secs=device_row.get("next_wake_secs", 3600))
 
 @router.get("/api/convert", name="convert_image")
-async def convert_image(url: str):
+async def convert_image(url: str, width: int = None, height: int = None):
     """
-    Given an image URL (originally JPG/other format), fetch the image,
-    process it (rotate, resize, letterbox), and return as a BMP.
+    Converts an image from a given URL to a BMP image with the desired resolution.
+    Accepts optional query parameters 'width' and 'height' to dynamically adjust the image.
     """
+    # Use provided dimensions or fallback to default TARGET_RESOLUTION
+    if width is None or height is None:
+        width, height = TARGET_RESOLUTION
+
     # Validate the URL parameter
     if not url:
         return Response("Missing URL parameter", status_code=400)
@@ -157,7 +175,6 @@ async def convert_image(url: str):
         async with aiohttp.ClientSession() as session:
             async with session.get(url) as resp:
                 if resp.status != 200:
-                    # If fetching fails, try the default fallback image
                     async with session.get(DEFAULT_FALLBACK_IMAGE) as fallback_resp:
                         if fallback_resp.status != 200:
                             return Response("Unable to fetch fallback image", status_code=500)
@@ -165,7 +182,6 @@ async def convert_image(url: str):
                 else:
                     image_bytes = await resp.read()
     except Exception as e:
-        # On exception, attempt to get the fallback image
         async with aiohttp.ClientSession() as session:
             async with session.get(DEFAULT_FALLBACK_IMAGE) as fallback_resp:
                 image_bytes = await fallback_resp.read()
@@ -174,7 +190,6 @@ async def convert_image(url: str):
     try:
         image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
     except Exception as e:
-        # If image processing fails, try the fallback image.
         async with aiohttp.ClientSession() as session:
             async with session.get(DEFAULT_FALLBACK_IMAGE) as fallback_resp:
                 image_bytes = await fallback_resp.read()
@@ -185,18 +200,17 @@ async def convert_image(url: str):
         image = image.rotate(90, expand=True)
 
     # Resize the image while maintaining aspect ratio.
-    image = ImageOps.contain(image, TARGET_RESOLUTION)
+    image = ImageOps.contain(image, (width, height))
 
-    # If the resized image doesn't exactly match the target resolution, apply letterboxing.
-    if image.size != TARGET_RESOLUTION:
-        image = fill_letterbox(image, *TARGET_RESOLUTION)
+    # Apply letterboxing if the resized image doesn't exactly match the target resolution.
+    if image.size != (width, height):
+        image = fill_letterbox(image, width, height)
 
     # Save the processed image as BMP into a bytes buffer.
     output_buffer = io.BytesIO()
     image.save(output_buffer, format="BMP")
     bmp_data = output_buffer.getvalue()
 
-    # Return the complete BMP bytes.
     return FastAPIResponse(content=bmp_data, media_type="image/bmp")
 
 # ------------------------------------------------------------------------------
@@ -222,10 +236,6 @@ app.include_router(router)
 app.include_router(daily_router)
 app.include_router(random_router)
 app.include_router(nts_router)
-
-# ------------------------------------------------------------------------------
-# Entry Point
-# ------------------------------------------------------------------------------
 
 if __name__ == "__main__":
     import uvicorn
