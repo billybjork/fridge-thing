@@ -69,11 +69,6 @@ async def get_or_create_device(conn: asyncpg.Connection, device_uuid: str) -> di
 # Pydantic Schemas
 # ------------------------------------------------------------------------------
 
-class DeviceDisplayRequest(BaseModel):
-    current_fw_ver: Optional[str] = None  # OTA updates ignored for now
-    battery_voltage: Optional[float] = None
-    wifi_signal: Optional[int] = None
-
 class DeviceDisplayResponse(BaseModel):
     image_url: str
     next_wake_secs: int
@@ -97,7 +92,6 @@ router = APIRouter()
 @router.post("/api/devices/{device_uuid}/display", response_model=DeviceDisplayResponse)
 async def get_display(
     device_uuid: str, 
-    request_data: DeviceDisplayRequest, 
     request: Request
 ) -> DeviceDisplayResponse:
     """
