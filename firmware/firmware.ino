@@ -21,7 +21,7 @@ AsyncWebServer server(80);
 DNSServer dnsServer;
 
 // OTA configuration
-const char* currentFirmwareVersion = "1.2";  // Current firmware version
+const char* currentFirmwareVersion = "1.3";  // Current firmware version
 const char* versionCheckURL = "https://s3.us-west-1.amazonaws.com/bjork.love/fridge-thing-firmware/version.txt";
 const char* firmwareURL = "https://s3.us-west-1.amazonaws.com/bjork.love/fridge-thing-firmware/firmware.ino.bin";
 
@@ -118,7 +118,7 @@ float voltageToPercent(float voltage) {
 
 /**
  * Log an event to "log.txt" on the SD card with a timestamp.
- * This uses the millis() time as a simple timestamp.
+ * Here, we use millis() as a simple timestamp.
  */
 void logEvent(const char* message) {
     if (!sdCardAvailable) {
@@ -126,7 +126,7 @@ void logEvent(const char* message) {
         return;
     }
     SdFile logFile;
-    // Open the log file in append mode.
+    // Open log file in append mode.
     if (!logFile.open("/log.txt", O_WRITE | O_CREAT | O_APPEND)) {
         Serial.println("ERROR: Could not open log file.");
         return;
@@ -138,11 +138,11 @@ void logEvent(const char* message) {
 
 /**
  * Update the display to show the current state message.
- * To avoid obstructing a fully rendered image, this overlay is only shown
- * when not in a stable (STATE_DISPLAYING_IMAGE) state with no errors.
+ * The overlay is shown only in transitional, error, or low-battery states.
+ * When an image is successfully rendered, this function does nothing.
  */
 void updateStateDisplay(bool fullRefresh = true) {
-    // Do not show overlay when an image is fully displayed and there are no errors.
+    // Do not update the overlay when the image is fully displayed with no errors.
     if (currentState == STATE_DISPLAYING_IMAGE && errorCode == ERROR_NONE) {
         return;
     }
@@ -197,9 +197,6 @@ void updateStateDisplay(bool fullRefresh = true) {
                     display.print("Unknown error");
             }
             break;
-        case STATE_SLEEPING:
-            display.print("Sleeping...");
-            break;
         default:
             display.print("State " + String(currentState));
     }
@@ -207,7 +204,7 @@ void updateStateDisplay(bool fullRefresh = true) {
 }
 
 /**
- * Set the current state and error code, store them persistently, update display, and log the event.
+ * Set the current state and error code, store them persistently, update display (if needed), and log the event.
  */
 void setState(int newState, int newErrorCode = ERROR_NONE) {
     preferences.begin("state", false);
@@ -226,6 +223,7 @@ void setState(int newState, int newErrorCode = ERROR_NONE) {
     Serial.println(stateMsg);
     logEvent(stateMsg.c_str());
     
+    // Update overlay only for states that require user feedback.
     updateStateDisplay();
 }
 
@@ -357,6 +355,8 @@ bool downloadToSD(const String &imageUrl, const String &localPath, WiFiClient &c
 /**
  * Fetch a BMP image from the server, save it to SD, render it, and then schedule deep sleep.
  * Battery information is included in the server request.
+ * 
+ * In normal operation, once the image is successfully rendered, no overlay is added.
  */
 void fetchAndDisplayImage() {
     setState(STATE_FETCHING_IMAGE);
@@ -467,26 +467,8 @@ void fetchAndDisplayImage() {
         return;
     }
     
-    // If battery is low, display a prominent warning over the image.
-    if (batteryPercent < BATTERY_LOW_PCT) {
-        display.fillRect(0, 0, 200, 30, WHITE);
-        display.setTextSize(2);
-        display.setTextColor(BLACK);
-        display.setCursor(10, 10);
-        display.print("LOW BATTERY!");
-        if (batteryPercent < BATTERY_CRITICAL_PCT) {
-            setState(STATE_ERROR, ERROR_LOW_BATTERY);
-            logEvent("Battery critically low; entering sleep mode.");
-            delay(5000);
-            esp_sleep_enable_timer_wakeup(3600 * 1000000ULL); // Sleep for 1 hour.
-            esp_sleep_enable_ext0_wakeup(GPIO_NUM_36, 0);
-            setState(STATE_SLEEPING);
-            delay(1000);
-            esp_deep_sleep_start();
-            return;
-        }
-    }
-    
+    // At this point, the image is fully rendered.
+    // We do not update the display with a "Sleeping..." overlay.
     display.display();
     
     String sleepMsg = "Sleeping for " + String(nextWakeSec) + " seconds...";
@@ -500,7 +482,10 @@ void fetchAndDisplayImage() {
     
     esp_sleep_enable_timer_wakeup(nextWakeSec * 1000000ULL);
     esp_sleep_enable_ext0_wakeup(GPIO_NUM_36, 0);
-    setState(STATE_SLEEPING);
+    
+    // Instead of calling setState(STATE_SLEEPING) which would update the display,
+    // we log the state and then immediately enter deep sleep.
+    logEvent("Entering sleep mode.");
     delay(1000);
     esp_deep_sleep_start();
 }
@@ -623,7 +608,7 @@ void startCaptivePortal() {
 }
 
 /**
- * Setup: initialize display, SD card, Wi-Fi, state, and decide whether to start normal operation or captive portal.
+ * Setup: initialize display, SD card, Wi-Fi, and state; decide whether to start normal operation or captive portal.
  */
 void setup() {
     Serial.begin(115200);
