@@ -29,6 +29,42 @@ const char* firmwareURL = "https://s3.us-west-1.amazonaws.com/bjork.love/fridge-
 const char *apSSID = "FridgeThing";
 const char *apPassword = "";
 
+// State tracking and error handling constants
+#define STATE_INITIALIZING     0
+#define STATE_CAPTIVE_PORTAL   1
+#define STATE_CONNECTING_WIFI  2
+#define STATE_CHECKING_UPDATE  3
+#define STATE_UPDATING_FW      4
+#define STATE_FETCHING_IMAGE   5
+#define STATE_DISPLAYING_IMAGE 6
+#define STATE_ERROR            7
+#define STATE_SLEEPING         8
+
+// Error codes
+#define ERROR_NONE             0
+#define ERROR_WIFI_CONNECT     1
+#define ERROR_SERVER_CONNECT   2
+#define ERROR_IMAGE_DOWNLOAD   3
+#define ERROR_SD_CARD          4
+#define ERROR_OTA_UPDATE       5
+#define ERROR_LOW_BATTERY      6
+
+// Global state variables
+int currentState = STATE_INITIALIZING;
+int errorCode = ERROR_NONE;
+uint8_t wifiReconnectAttempts = 0;
+bool sdCardAvailable = false;
+unsigned long stateChangeTime = 0;
+unsigned long lastWifiCheckTime = 0;
+
+// Connection timeouts and intervals
+#define WIFI_CONNECT_TIMEOUT   30000     // 30 seconds
+#define WIFI_CHECK_INTERVAL    60000     // 1 minute
+
+// Battery thresholds
+#define BATTERY_LOW_PCT        10.0f     // 10% battery is low
+#define BATTERY_CRITICAL_PCT   5.0f      // 5% battery is critical
+
 // HTML content for Wi-Fi setup page
 const char *htmlSetupPage =
 "<!DOCTYPE html>\n"
@@ -37,30 +73,10 @@ const char *htmlSetupPage =
 "    <meta charset=\"UTF-8\">\n"
 "    <title>Fridge Thing - Wi-Fi Setup</title>\n"
 "    <style>\n"
-"      body {\n"
-"        font-family: Arial, sans-serif;\n"
-"        font-size: 20px;\n"
-"        background-color: #f8f8f8;\n"
-"        text-align: center;\n"
-"        margin: 20px;\n"
-"      }\n"
-"      h2 {\n"
-"        font-size: 28px;\n"
-"        margin-bottom: 20px;\n"
-"      }\n"
-"      input[type=\"text\"],\n"
-"      input[type=\"password\"] {\n"
-"        font-size: 20px;\n"
-"        padding: 10px;\n"
-"        margin: 10px 0;\n"
-"        width: 80%;\n"
-"        max-width: 400px;\n"
-"      }\n"
-"      input[type=\"submit\"] {\n"
-"        font-size: 20px;\n"
-"        padding: 10px 20px;\n"
-"        margin-top: 20px;\n"
-"      }\n"
+"      body { font-family: Arial, sans-serif; font-size: 20px; background-color: #f8f8f8; text-align: center; margin: 20px; }\n"
+"      h2 { font-size: 28px; margin-bottom: 20px; }\n"
+"      input[type=\"text\"], input[type=\"password\"] { font-size: 20px; padding: 10px; margin: 10px 0; width: 80%; max-width: 400px; }\n"
+"      input[type=\"submit\"] { font-size: 20px; padding: 10px 20px; margin-top: 20px; }\n"
 "    </style>\n"
 "  </head>\n"
 "  <body>\n"
@@ -90,10 +106,10 @@ const char *htmlRedirect =
 static const unsigned long CAPTIVE_PORTAL_TIMEOUT_MS = 300000;
 unsigned long captivePortalStartTime = 0;
 
-// Helper function: Convert voltage (3.2V–4.2V) to approximate battery percentage
+/**
+ * Helper function: Convert voltage (3.2V–4.2V) to approximate battery percentage.
+ */
 float voltageToPercent(float voltage) {
-    // Linear approximation for LiPo battery:
-    // 4.2V -> 100% and 3.2V -> 0%
     float pct = (voltage - 3.2f) * 100.0f / (4.2f - 3.2f);
     if (pct > 100.0f) pct = 100.0f;
     if (pct < 0.0f)   pct = 0.0f;
@@ -101,187 +117,410 @@ float voltageToPercent(float voltage) {
 }
 
 /**
- * Download a file (BMP) from 'imageUrl' using WiFiClient
- * and store it on the SD card at 'localPath' (e.g. "/temp.bmp")
- * using SdFat's SdFile. Return true if successful, false otherwise.
+ * Log an event to "log.txt" on the SD card with a timestamp.
+ * This uses the millis() time as a simple timestamp.
  */
-bool downloadToSD(const String &imageUrl, const String &localPath, WiFiClient &client)
-{
-    HTTPClient http;
-    http.setTimeout(10000);
+void logEvent(const char* message) {
+    if (!sdCardAvailable) {
+        Serial.println("SD card not available for logging.");
+        return;
+    }
+    SdFile logFile;
+    // Open the log file in append mode.
+    if (!logFile.open("/log.txt", O_WRITE | O_CREAT | O_APPEND)) {
+        Serial.println("ERROR: Could not open log file.");
+        return;
+    }
+    String logLine = String(millis()) + ": " + message + "\n";
+    logFile.write((const uint8_t*)logLine.c_str(), logLine.length());
+    logFile.close();
+}
 
-    Serial.println("Downloading from: " + imageUrl);
-    if (!http.begin(client, imageUrl)) {
-        Serial.println("ERROR: http.begin() failed");
+/**
+ * Update the display to show the current state message.
+ * To avoid obstructing a fully rendered image, this overlay is only shown
+ * when not in a stable (STATE_DISPLAYING_IMAGE) state with no errors.
+ */
+void updateStateDisplay(bool fullRefresh = true) {
+    // Do not show overlay when an image is fully displayed and there are no errors.
+    if (currentState == STATE_DISPLAYING_IMAGE && errorCode == ERROR_NONE) {
+        return;
+    }
+    
+    if (fullRefresh) {
+        display.clearDisplay();
+    }
+    display.setTextColor(BLACK);
+    display.setTextSize(2);
+    display.setCursor(10, 10);
+    switch (currentState) {
+        case STATE_INITIALIZING:
+            display.print("Initializing...");
+            break;
+        case STATE_CAPTIVE_PORTAL:
+            display.print("Wi-Fi Setup Mode");
+            break;
+        case STATE_CONNECTING_WIFI:
+            display.print("Connecting Wi-Fi...");
+            break;
+        case STATE_CHECKING_UPDATE:
+            display.print("Checking updates...");
+            break;
+        case STATE_UPDATING_FW:
+            display.print("Updating firmware...");
+            break;
+        case STATE_FETCHING_IMAGE:
+            display.print("Fetching image...");
+            break;
+        case STATE_ERROR:
+            display.print("ERROR: ");
+            switch (errorCode) {
+                case ERROR_WIFI_CONNECT:
+                    display.print("Wi-Fi failed");
+                    break;
+                case ERROR_SERVER_CONNECT:
+                    display.print("Server error");
+                    break;
+                case ERROR_IMAGE_DOWNLOAD:
+                    display.print("Img download fail");
+                    break;
+                case ERROR_SD_CARD:
+                    display.print("SD card error");
+                    break;
+                case ERROR_OTA_UPDATE:
+                    display.print("OTA update fail");
+                    break;
+                case ERROR_LOW_BATTERY:
+                    display.print("Battery critical");
+                    break;
+                default:
+                    display.print("Unknown error");
+            }
+            break;
+        case STATE_SLEEPING:
+            display.print("Sleeping...");
+            break;
+        default:
+            display.print("State " + String(currentState));
+    }
+    display.display();
+}
+
+/**
+ * Set the current state and error code, store them persistently, update display, and log the event.
+ */
+void setState(int newState, int newErrorCode = ERROR_NONE) {
+    preferences.begin("state", false);
+    preferences.putInt("lastState", currentState);
+    preferences.putInt("errorCode", newErrorCode);
+    preferences.end();
+    
+    currentState = newState;
+    errorCode = newErrorCode;
+    stateChangeTime = millis();
+    
+    String stateMsg = "State changed to: " + String(currentState);
+    if (newErrorCode != ERROR_NONE) {
+        stateMsg += " (Error: " + String(newErrorCode) + ")";
+    }
+    Serial.println(stateMsg);
+    logEvent(stateMsg.c_str());
+    
+    updateStateDisplay();
+}
+
+/**
+ * Check Wi-Fi connection and attempt to reconnect if necessary.
+ * Returns true if connected, false otherwise.
+ */
+bool checkAndReconnectWifi() {
+    if (WiFi.status() == WL_CONNECTED) {
+        wifiReconnectAttempts = 0;
+        return true;
+    }
+    if (millis() - lastWifiCheckTime < WIFI_CHECK_INTERVAL) {
         return false;
     }
+    lastWifiCheckTime = millis();
+    
+    Serial.println("Wi-Fi disconnected; attempting reconnect...");
+    logEvent("Wi-Fi disconnected; attempting reconnect");
+    
+    preferences.begin("wifi", false);
+    String ssid = preferences.getString("ssid", "");
+    String password = preferences.getString("password", "");
+    preferences.end();
+    
+    if (ssid.length() == 0) {
+        Serial.println("No stored Wi-Fi credentials.");
+        logEvent("No stored Wi-Fi credentials.");
+        return false;
+    }
+    
+    setState(STATE_CONNECTING_WIFI);
+    WiFi.disconnect();
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(ssid.c_str(), password.c_str());
+    
+    unsigned long startAttempt = millis();
+    while (WiFi.status() != WL_CONNECTED) {
+        if (millis() - startAttempt > WIFI_CONNECT_TIMEOUT) {
+            wifiReconnectAttempts++;
+            Serial.println("Wi-Fi reconnect attempt failed.");
+            logEvent("Wi-Fi reconnect attempt failed.");
+            if (wifiReconnectAttempts >= 3) {
+                Serial.println("Multiple failures; switching to captive portal.");
+                logEvent("Multiple Wi-Fi failures; switching to captive portal.");
+                return false;
+            }
+            return false;
+        }
+        delay(500);
+    }
+    
+    Serial.println("Wi-Fi reconnected successfully!");
+    logEvent("Wi-Fi reconnected successfully.");
+    wifiReconnectAttempts = 0;
+    return true;
+}
 
+/**
+ * Download a BMP image from 'imageUrl' and store it on the SD card at 'localPath'.
+ * Returns true if successful.
+ */
+bool downloadToSD(const String &imageUrl, const String &localPath, WiFiClient &client) {
+    if (!sdCardAvailable) {
+        Serial.println("ERROR: SD card not available");
+        logEvent("ERROR: SD card not available");
+        return false;
+    }
+    
+    HTTPClient http;
+    http.setTimeout(10000);
+    Serial.println("Downloading from: " + imageUrl);
+    logEvent(("Downloading from: " + imageUrl).c_str());
+    if (!http.begin(client, imageUrl)) {
+        Serial.println("ERROR: http.begin() failed");
+        logEvent("ERROR: http.begin() failed");
+        return false;
+    }
+    
     int httpCode = http.GET();
     if (httpCode != 200) {
         Serial.printf("ERROR: HTTP GET code=%d\n", httpCode);
+        logEvent(("ERROR: HTTP GET code=" + String(httpCode)).c_str());
         http.end();
         return false;
     }
-
+    
     WiFiClient *stream = http.getStreamPtr();
     if (!stream) {
         Serial.println("ERROR: No stream from HTTP");
+        logEvent("ERROR: No stream from HTTP");
         http.end();
         return false;
     }
-
+    
     SdFile outFile;
     if (!outFile.open(localPath.c_str(), O_WRITE | O_CREAT | O_TRUNC)) {
         Serial.println("ERROR: Could not open file on SD");
+        logEvent("ERROR: Could not open file on SD");
         http.end();
         return false;
     }
-
+    
     uint8_t buff[512];
     int totalBytes = 0;
     unsigned long lastReadTime = millis();
-    // Loop until the stream is no longer providing data for 10 seconds
     while ((millis() - lastReadTime) < 10000) {
         size_t availableBytes = stream->available();
         if (availableBytes > 0) {
-            lastReadTime = millis();  // reset timeout since we got data
+            lastReadTime = millis();
             int bytesRead = stream->readBytes((char*)buff, (availableBytes > sizeof(buff)) ? sizeof(buff) : availableBytes);
             outFile.write(buff, bytesRead);
             totalBytes += bytesRead;
         } else if (!stream->connected()) {
-            // If not connected and no data available, assume download complete.
             break;
         }
         delay(1);
     }
-
+    
     outFile.close();
     http.end();
-
-    Serial.printf("Downloaded %d bytes -> %s\n", totalBytes, localPath.c_str());
+    
+    String downloadMsg = "Downloaded " + String(totalBytes) + " bytes -> " + localPath;
+    Serial.println(downloadMsg);
+    logEvent(downloadMsg.c_str());
     return (totalBytes > 0);
 }
 
 /**
- * Fetch a BMP image from the server, store on SD, then display it with drawImage().
- * Additionally, overlay a low battery indicator if battery is below 10%.
+ * Fetch a BMP image from the server, save it to SD, render it, and then schedule deep sleep.
+ * Battery information is included in the server request.
  */
 void fetchAndDisplayImage() {
-    if (WiFi.status() != WL_CONNECTED) {
+    setState(STATE_FETCHING_IMAGE);
+    
+    if (!checkAndReconnectWifi()) {
+        setState(STATE_ERROR, ERROR_WIFI_CONNECT);
         Serial.println("ERROR: Not connected to Wi-Fi");
+        logEvent("ERROR: Not connected to Wi-Fi");
+        delay(5000);
+        ESP.restart();
         return;
     }
-
-    // Generate a unique device ID based on the ESP32's MAC address.
-    // The ESP32 has a unique 48-bit MAC address which we format as a hexadecimal string.
+    
+    // Generate a unique device ID from the ESP32 MAC address.
     uint64_t chipid = ESP.getEfuseMac();
-    char deviceId[17]; // 16 characters + null terminator
+    char deviceId[17];
     sprintf(deviceId, "%04X%08X", (uint16_t)(chipid >> 32), (uint32_t)chipid);
     String deviceUuid = String(deviceId);
     Serial.println("Device UUID: " + deviceUuid);
-
-    // The server route: /api/devices/{device_uuid}/display
+    logEvent(("Device UUID: " + deviceUuid).c_str());
+    
+    // Prepare the server URL.
     String serverUrl = "https://fridge-thing-production.up.railway.app/api/devices/" + deviceUuid + "/display";
     WiFiClientSecure client;
     client.setInsecure();
-
-    // 1) POST to get {image_url, next_wake_secs}
+    
+    // POST request with firmware version and battery info.
     HTTPClient http;
     http.setTimeout(10000);
     http.begin(client, serverUrl);
     http.addHeader("Content-Type", "application/json");
-
+    
     StaticJsonDocument<256> doc;
     doc["current_fw_ver"] = currentFirmwareVersion;
+    double voltage = display.readBattery();
+    float batteryPercent = voltageToPercent(voltage);
+    doc["battery_pct"] = batteryPercent;
+    doc["battery_voltage"] = voltage;
+    
     String body;
     serializeJson(doc, body);
-
     int httpCode = http.POST(body);
     if (httpCode != 200) {
-        Serial.printf("ERROR: POST /api/devices/.../display code=%d\n", httpCode);
+        String errMsg = "ERROR: POST code=" + String(httpCode);
+        Serial.println(errMsg);
+        logEvent(errMsg.c_str());
         http.end();
+        setState(STATE_ERROR, ERROR_SERVER_CONNECT);
+        delay(5000);
+        // Schedule a retry after 1 minute.
+        esp_sleep_enable_timer_wakeup(60 * 1000000ULL);
+        esp_sleep_enable_ext0_wakeup(GPIO_NUM_36, 0);
+        setState(STATE_SLEEPING);
+        delay(1000);
+        esp_deep_sleep_start();
         return;
     }
-
+    
     String resp = http.getString();
     Serial.println("Server response: " + resp);
-
+    logEvent(("Server response: " + resp).c_str());
+    
     StaticJsonDocument<512> respDoc;
     DeserializationError err = deserializeJson(respDoc, resp);
     http.end();
     if (err) {
         Serial.println("ERROR: JSON parse failed");
+        logEvent("ERROR: JSON parse failed");
+        setState(STATE_ERROR, ERROR_SERVER_CONNECT);
+        delay(5000);
+        ESP.restart();
         return;
     }
-
-    // Extract data from server response
-    String imageUrl    = respDoc["image_url"].as<String>();
-    long   nextWakeSec = respDoc["next_wake_secs"].as<long>();
-
+    
+    String imageUrl = respDoc["image_url"].as<String>();
+    long nextWakeSec = respDoc["next_wake_secs"].as<long>();
     if (imageUrl.startsWith("http://")) {
         imageUrl.replace("http://", "https://");
     }
-
-    // 2) Download file to SD using the secure client (WiFiClientSecure)
+    
+    // Download the image.
     const String localPath = "/temp.bmp";
     if (!downloadToSD(imageUrl, localPath, client)) {
         Serial.println("ERROR: Could not download image");
+        logEvent("ERROR: Could not download image");
+        setState(STATE_ERROR, ERROR_IMAGE_DOWNLOAD);
+        delay(5000);
+        // Schedule a retry after 1 minute.
+        esp_sleep_enable_timer_wakeup(60 * 1000000ULL);
+        esp_sleep_enable_ext0_wakeup(GPIO_NUM_36, 0);
+        setState(STATE_SLEEPING);
+        delay(1000);
+        esp_deep_sleep_start();
         return;
     }
-
-    // 3) Render the downloaded image with drawImage()
-    Serial.println("Rendering downloaded image with drawImage...");
+    
+    // Render the downloaded image.
+    setState(STATE_DISPLAYING_IMAGE);
+    Serial.println("Rendering image...");
+    logEvent("Rendering image...");
     bool ok = display.drawImage(localPath.c_str(), 0, 0);
     if (!ok) {
         Serial.println("ERROR: drawImage failed");
-    } else {
-        Serial.println("BMP image displayed successfully.");
+        logEvent("ERROR: drawImage failed");
+        setState(STATE_ERROR, ERROR_IMAGE_DOWNLOAD);
+        delay(5000);
+        ESP.restart();
+        return;
     }
-
-    // --- Low Battery Indicator Implementation ---
-    double voltage = display.readBattery();
-    float batteryPercent = voltageToPercent(voltage);
-    Serial.print("Battery Voltage: ");
-    Serial.print(voltage, 2);
-    Serial.print(" V (");
-    Serial.print(batteryPercent, 1);
-    Serial.println("%)");
-
-    if (batteryPercent < 10.0f) {
-        // Draw a white rectangle to clear an area and overlay the warning text.
-        display.fillRect(0, 0, 200, 30, WHITE); // Adjust the dimensions as needed.
+    
+    // If battery is low, display a prominent warning over the image.
+    if (batteryPercent < BATTERY_LOW_PCT) {
+        display.fillRect(0, 0, 200, 30, WHITE);
         display.setTextSize(2);
         display.setTextColor(BLACK);
         display.setCursor(10, 10);
         display.print("LOW BATTERY!");
+        if (batteryPercent < BATTERY_CRITICAL_PCT) {
+            setState(STATE_ERROR, ERROR_LOW_BATTERY);
+            logEvent("Battery critically low; entering sleep mode.");
+            delay(5000);
+            esp_sleep_enable_timer_wakeup(3600 * 1000000ULL); // Sleep for 1 hour.
+            esp_sleep_enable_ext0_wakeup(GPIO_NUM_36, 0);
+            setState(STATE_SLEEPING);
+            delay(1000);
+            esp_deep_sleep_start();
+            return;
+        }
     }
-    // --- End Low Battery Indicator ---
-
-    // Update the display with the final content
+    
     display.display();
-
-    // 4) Deep sleep
-    Serial.printf("Going to deep sleep for %ld seconds...\n", nextWakeSec);
-    // Enable timer wakeup for the next scheduled image update.
+    
+    String sleepMsg = "Sleeping for " + String(nextWakeSec) + " seconds...";
+    Serial.println(sleepMsg);
+    logEvent(sleepMsg.c_str());
+    
+    // Store next wake-up info persistently.
+    preferences.begin("sleep", false);
+    preferences.putLong("nextWake", nextWakeSec);
+    preferences.end();
+    
     esp_sleep_enable_timer_wakeup(nextWakeSec * 1000000ULL);
-    // Enable external wakeup from the Inkplate wake button (GPIO 36).
     esp_sleep_enable_ext0_wakeup(GPIO_NUM_36, 0);
+    setState(STATE_SLEEPING);
+    delay(1000);
     esp_deep_sleep_start();
 }
 
 /**
- * Check for OTA firmware updates.
- *
- * This function makes an HTTPS request to fetch the latest firmware version.
- * If it differs from the current version, it triggers an OTA update using the ESP32's
- * built-in HTTPUpdate library.
- *
- * Note: OTA updates require an active Internet connection.
+ * Check for OTA firmware updates. If a new version is available, trigger the update.
  */
 void checkOTAUpdate() {
-    Serial.println("Checking for OTA firmware update...");
+    setState(STATE_CHECKING_UPDATE);
+    Serial.println("Checking for OTA update...");
+    logEvent("Checking for OTA update...");
+    
+    if (!checkAndReconnectWifi()) {
+        Serial.println("Wi-Fi not connected; skipping OTA check");
+        logEvent("Wi-Fi not connected; skipping OTA update check");
+        return;
+    }
+    
     WiFiClientSecure client;
-    client.setInsecure();  // For simplicity; for production, set up proper certificate validation.
+    client.setInsecure();
     
     HTTPClient http;
     http.setTimeout(10000);
@@ -290,148 +529,83 @@ void checkOTAUpdate() {
         if (httpCode == 200) {
             String newVersion = http.getString();
             newVersion.trim();
-            Serial.println("Latest firmware version available: " + newVersion);
+            Serial.println("Latest firmware: " + newVersion);
+            logEvent(("Latest firmware: " + newVersion).c_str());
             if (newVersion != String(currentFirmwareVersion)) {
-                Serial.println("New firmware version available. Starting OTA update...");
-                // Trigger OTA update using the firmware binary URL.
+                Serial.println("New firmware available. Starting OTA update...");
+                logEvent("New firmware available. Starting OTA update...");
+                setState(STATE_UPDATING_FW);
                 t_httpUpdate_return ret = httpUpdate.update(client, firmwareURL);
                 switch(ret) {
                     case HTTP_UPDATE_FAILED:
-                        Serial.printf("HTTP_UPDATE_FAILED Error (%d): %s\n", httpUpdate.getLastError(), httpUpdate.getLastErrorString().c_str());
+                        Serial.printf("OTA failed (%d): %s\n", httpUpdate.getLastError(), httpUpdate.getLastErrorString().c_str());
+                        logEvent(("OTA failed (" + String(httpUpdate.getLastError()) + "): " + httpUpdate.getLastErrorString()).c_str());
+                        setState(STATE_ERROR, ERROR_OTA_UPDATE);
+                        delay(5000);
                         break;
                     case HTTP_UPDATE_NO_UPDATES:
-                        Serial.println("No OTA update available (unexpected).");
+                        Serial.println("No OTA updates available.");
+                        logEvent("No OTA updates available.");
                         break;
                     case HTTP_UPDATE_OK:
-                        // On success, the device will reboot automatically.
+                        // Device will reboot automatically.
                         break;
                 }
             } else {
-                Serial.println("Firmware is up-to-date.");
+                Serial.println("Firmware up-to-date.");
+                logEvent("Firmware up-to-date.");
             }
         } else {
-            Serial.printf("Failed to check version, HTTP GET code: %d\n", httpCode);
+            Serial.printf("OTA check HTTP code: %d\n", httpCode);
+            logEvent(("OTA check HTTP code: " + String(httpCode)).c_str());
         }
         http.end();
     } else {
-        Serial.println("Failed to initiate HTTP connection for OTA version check.");
+        Serial.println("Failed to initiate OTA HTTP connection.");
+        logEvent("Failed to initiate OTA HTTP connection.");
     }
 }
 
 /**
- * Setup: Initialize SD, connect Wi-Fi, start captive portal if needed.
- */
-void setup() {
-    Serial.begin(115200);
-
-    preferences.begin("wifi", false);
-    String storedSSID = preferences.getString("ssid", "");
-    String storedPass = preferences.getString("password", "");
-    preferences.end();
-
-    // Initialize Inkplate display
-    display.begin();
-
-    // Initialize SD card
-    if (!display.sdCardInit()) {
-        Serial.println("SD init failed. We'll keep going, but can't store images!");
-    }
-
-    // Only display booting screen on a cold start.
-    // If waking from deep sleep (timer or ext0 wakeup), skip booting to allow a seamless image refresh.
-    if (esp_sleep_get_wakeup_cause() != ESP_SLEEP_WAKEUP_TIMER &&
-        esp_sleep_get_wakeup_cause() != ESP_SLEEP_WAKEUP_EXT0) {
-        display.clearDisplay();
-        display.setTextColor(BLACK);
-        display.setTextSize(4);
-        display.setCursor(10, 20);
-        display.print("Booting...");
-        display.display();
-    }
-
-    // Attempt Wi-Fi connection using stored credentials
-    if (storedSSID != "") {
-        WiFi.mode(WIFI_STA);
-        WiFi.begin(storedSSID.c_str(), storedPass.c_str());
-
-        int attempts = 0;
-        while (WiFi.status() != WL_CONNECTED && attempts < 15) {
-            delay(1000);
-            Serial.print(".");
-            attempts++;
-        }
-
-        if (WiFi.status() == WL_CONNECTED) {
-            Serial.println("\nConnected to Wi-Fi!");
-            Serial.print("IP: ");
-            Serial.println(WiFi.localIP());
-
-            // Check for OTA update immediately after Wi-Fi connects.
-            checkOTAUpdate();
-            // If no OTA update is triggered (or after update failure), continue with normal operation.
-            fetchAndDisplayImage();
-            return;
-        }
-    }
-
-    // If Wi-Fi fails, start the captive portal.
-    startCaptivePortal();
-}
-
-/**
- * Start captive portal if no Wi-Fi credentials exist or connection fails.
+ * Start the captive portal so the user can input Wi-Fi credentials.
  */
 void startCaptivePortal() {
-    Serial.println("\nStarting Captive Portal...");
+    setState(STATE_CAPTIVE_PORTAL);
+    Serial.println("Starting Captive Portal...");
+    logEvent("Starting Captive Portal");
+    
     WiFi.mode(WIFI_AP);
     WiFi.softAP(apSSID, apPassword);
-
-    // Show instructions on display
-    display.clearDisplay();
-    display.setTextColor(BLACK);
-    display.setTextSize(5);
-    display.setCursor(10, 10);
-    display.print("Wi-Fi Setup");
-    display.setTextSize(2);
-    display.setCursor(10, 80);
-    display.print("Connect to the wi-fi network 'FridgeThing'");
-    display.setCursor(10, 120);
-    display.print("If not prompted automatically, visit: http://fridgething.local/");
-    display.display();
-
-    // Start DNS redirection
+    
     dnsServer.start(53, "*", WiFi.softAPIP());
-
-    // Start mDNS
+    
     if (!MDNS.begin("fridgething")) {
         Serial.println("Error starting mDNS");
+        logEvent("Error starting mDNS");
     }
-
-    // Setup captive portal routes
+    
     server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
         request->send(200, "text/html", htmlSetupPage);
     });
-
     server.on("/setup", HTTP_POST, [](AsyncWebServerRequest *request) {
         if (request->hasParam("ssid", true) && request->hasParam("password", true)) {
             String newSSID = request->getParam("ssid", true)->value();
             String newPassword = request->getParam("password", true)->value();
-
+            
             preferences.begin("wifi", false);
             preferences.putString("ssid", newSSID);
             preferences.putString("password", newPassword);
             preferences.end();
-
+            
             request->send(200, "text/html",
                           "<html><body><h2>Wi-Fi Configured!</h2><p>Restarting...</p></body></html>");
+            logEvent("Wi-Fi credentials updated via captive portal.");
             delay(2000);
             ESP.restart();
         } else {
             request->send(400, "text/plain", "Missing SSID or Password");
         }
     });
-
-    // Common captive portal redirections
     server.on("/generate_204", HTTP_GET, [](AsyncWebServerRequest *request) {
         request->send(200, "text/html", htmlRedirect);
     });
@@ -444,38 +618,142 @@ void startCaptivePortal() {
     server.onNotFound([](AsyncWebServerRequest *request) {
         request->send(200, "text/html", htmlRedirect);
     });
-
-    // Start HTTP server
     server.begin();
-
-    // Record the time we started (for eventual timeout)
     captivePortalStartTime = millis();
 }
 
 /**
- * Main loop:
- * - Handle captive portal timeouts.
+ * Setup: initialize display, SD card, Wi-Fi, state, and decide whether to start normal operation or captive portal.
+ */
+void setup() {
+    Serial.begin(115200);
+    Serial.println("\n\nFridge Thing starting up...");
+    logEvent("Fridge Thing starting up...");
+    
+    // Optionally restore previous state info.
+    preferences.begin("state", false);
+    int lastState = preferences.getInt("lastState", STATE_INITIALIZING);
+    int lastError = preferences.getInt("errorCode", ERROR_NONE);
+    preferences.end();
+    
+    currentState = STATE_INITIALIZING;
+    
+    display.begin();
+    updateStateDisplay(); // Show initial status.
+    
+    // Initialize SD card.
+    sdCardAvailable = display.sdCardInit();
+    if (!sdCardAvailable) {
+        Serial.println("SD init failed. Continuing without SD storage.");
+        logEvent("SD init failed.");
+        setState(STATE_ERROR, ERROR_SD_CARD);
+        delay(3000);
+    }
+    
+    // Check battery before continuing.
+    double voltage = display.readBattery();
+    float batteryPercent = voltageToPercent(voltage);
+    String battMsg = "Battery: " + String(batteryPercent, 1) + "% (" + String(voltage, 2) + "V)";
+    Serial.println(battMsg);
+    logEvent(battMsg.c_str());
+    if (batteryPercent < BATTERY_CRITICAL_PCT) {
+        Serial.println("CRITICAL: Battery too low!");
+        logEvent("CRITICAL: Battery too low!");
+        setState(STATE_ERROR, ERROR_LOW_BATTERY);
+        delay(5000);
+        esp_sleep_enable_timer_wakeup(3600 * 1000000ULL); // Sleep for 1 hour.
+        esp_sleep_enable_ext0_wakeup(GPIO_NUM_36, 0);
+        setState(STATE_SLEEPING);
+        delay(1000);
+        esp_deep_sleep_start();
+        return;
+    }
+    
+    // Read stored Wi-Fi credentials.
+    preferences.begin("wifi", false);
+    String storedSSID = preferences.getString("ssid", "");
+    String storedPass = preferences.getString("password", "");
+    preferences.end();
+    
+    // Check wakeup reason (cold boot vs. wake from sleep).
+    esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
+    if (wakeup_reason == ESP_SLEEP_WAKEUP_TIMER || wakeup_reason == ESP_SLEEP_WAKEUP_EXT0) {
+        Serial.println("Woke from sleep");
+        logEvent("Woke from sleep");
+        if (storedSSID != "") {
+            setState(STATE_CONNECTING_WIFI);
+            WiFi.mode(WIFI_STA);
+            WiFi.begin(storedSSID.c_str(), storedPass.c_str());
+            
+            unsigned long startTime = millis();
+            int attempts = 0;
+            while (WiFi.status() != WL_CONNECTED && attempts < 15) {
+                if (millis() - startTime > WIFI_CONNECT_TIMEOUT) break;
+                delay(1000);
+                Serial.print(".");
+                attempts++;
+            }
+            if (WiFi.status() == WL_CONNECTED) {
+                Serial.println("\nWi-Fi connected!");
+                logEvent("Wi-Fi connected on wakeup.");
+                Serial.print("IP: ");
+                Serial.println(WiFi.localIP());
+                checkOTAUpdate();
+                fetchAndDisplayImage();
+                return;
+            } else {
+                Serial.println("\nWi-Fi connection failed on wakeup.");
+                logEvent("Wi-Fi connection failed on wakeup.");
+                setState(STATE_ERROR, ERROR_WIFI_CONNECT);
+                delay(3000);
+            }
+        }
+    } else {
+        // Cold boot: try to connect with stored credentials.
+        if (storedSSID != "") {
+            setState(STATE_CONNECTING_WIFI);
+            WiFi.mode(WIFI_STA);
+            WiFi.begin(storedSSID.c_str(), storedPass.c_str());
+            
+            unsigned long startTime = millis();
+            int attempts = 0;
+            while (WiFi.status() != WL_CONNECTED && attempts < 15) {
+                if (millis() - startTime > WIFI_CONNECT_TIMEOUT) break;
+                delay(1000);
+                Serial.print(".");
+                attempts++;
+            }
+            if (WiFi.status() == WL_CONNECTED) {
+                Serial.println("\nWi-Fi connected!");
+                logEvent("Wi-Fi connected on cold boot.");
+                Serial.print("IP: ");
+                Serial.println(WiFi.localIP());
+                checkOTAUpdate();
+                fetchAndDisplayImage();
+                return;
+            }
+        }
+    }
+    
+    // If Wi-Fi connection fails or no credentials, start captive portal.
+    startCaptivePortal();
+}
+
+/**
+ * Main loop: process DNS requests and manage captive portal timeout.
  */
 void loop() {
     dnsServer.processNextRequest();
-
-    // If in AP mode, check if user took too long
+    
     if (WiFi.getMode() == WIFI_AP && captivePortalStartTime > 0) {
         unsigned long elapsed = millis() - captivePortalStartTime;
-        if (elapsed >= CAPTIVE_PORTAL_TIMEOUT_MS) {  // 5 minutes
-            Serial.println("No Wi-Fi config received; going to deep sleep...");
-
-            // Sleep for 30 seconds (or any appropriate fallback)
-            esp_sleep_enable_timer_wakeup(30ULL * 1000000ULL);
-            // Enable external wakeup via the Inkplate wake button (GPIO 36)
+        if (elapsed >= CAPTIVE_PORTAL_TIMEOUT_MS) {
+            Serial.println("Captive portal timeout; going to sleep.");
+            logEvent("Captive portal timeout; going to sleep.");
+            setState(STATE_SLEEPING);
+            esp_sleep_enable_timer_wakeup(30ULL * 1000000ULL); // Sleep for 30 seconds.
             esp_sleep_enable_ext0_wakeup(GPIO_NUM_36, 0);
-            display.clearDisplay();
-            display.setCursor(10, 50);
-            display.setTextSize(2);
-            display.print("Going to sleep...");
-            display.display();
             delay(1000);
-
             esp_deep_sleep_start();
         }
     }
