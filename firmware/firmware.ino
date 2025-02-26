@@ -120,21 +120,38 @@ float voltageToPercent(float voltage) {
 }
 
 /**
- * Log an event to "log.txt" on the SD card with a timestamp.
- * We use millis() as a simple timestamp.
+ * Log an event to "log.txt" on the SD card with a timestamp from RTC.
+ * Uses the device's Real Time Clock instead of millis() for accurate timestamping.
  */
 void logEvent(const char* message) {
     if (!sdCardAvailable) {
         Serial.println("SD card not available for logging.");
         return;
     }
+    
     SdFile logFile;
     // Open the log file in append mode.
     if (!logFile.open("/log.txt", O_WRITE | O_CREAT | O_APPEND)) {
         Serial.println("ERROR: Could not open log file.");
         return;
     }
-    String logLine = String(millis()) + ": " + message + "\n";
+    
+    // Get current date and time from RTC
+    display.rtcGetRtcData();
+    
+    uint8_t second = display.rtcGetSecond();
+    uint8_t minute = display.rtcGetMinute();
+    uint8_t hour = display.rtcGetHour();
+    uint8_t day = display.rtcGetDay();
+    uint8_t month = display.rtcGetMonth();
+    uint8_t year = display.rtcGetYear();
+    
+    // Format: YYYY-MM-DD HH:MM:SS: message
+    char timestamp[20];
+    sprintf(timestamp, "20%02d-%02d-%02d %02d:%02d:%02d", 
+            year, month, day, hour, minute, second);
+    
+    String logLine = String(timestamp) + ": " + message + "\n";
     logFile.write((const uint8_t*)logLine.c_str(), logLine.length());
     logFile.close();
 }
@@ -620,6 +637,19 @@ void startCaptivePortal() {
 void setup() {
     Serial.begin(115200);
     Serial.println("\n\nFridge Thing starting up...");
+    
+    // Initialize display first
+    display.begin();
+    
+    // Initialize RTC if needed (only needed on first boot)
+    display.rtcGetRtcData();
+    if (display.rtcGetYear() < 20) {  // Basic check if RTC needs to be set (year before 2020)
+        Serial.println("RTC time not set, initializing to default time...");
+        // Set a default time (you can adjust this)
+        display.rtcSetTime(12, 0, 0);  // 12:00:00
+        display.rtcSetDate(1, 1, 1, 23);  // Monday, Jan 1, 2023
+    }
+    
     logEvent("Fridge Thing starting up...");
     
     // Increment boot count (persistent across deep sleep)
