@@ -8,30 +8,28 @@ from datetime import datetime
 from pathlib import Path
 from PIL import Image
 
-# Import the Inky Impression library from Pimoroni.
-# (Adjust the import based on your actual Inky model and library version.)
-from inky import InkyImpression
+# Instead of importing InkyImpression directly, we use auto() to detect the display.
 from inky.auto import auto
 
 # -------------------------------------------------------------------------------
 # Configuration
 # -------------------------------------------------------------------------------
 
-# Function to retrieve the MAC address from wlan0 and format it as a unique ID.
 def get_device_uuid() -> str:
+    """
+    Retrieves the MAC address from wlan0 and returns a formatted string as the device UUID.
+    """
     try:
         with open("/sys/class/net/wlan0/address", "r") as f:
             mac = f.read().strip()  # e.g., "b8:27:eb:12:34:56"
-        # Remove colons and convert to uppercase to create a simple unique ID.
+        # Remove colons and convert to uppercase to form a simple unique ID.
         uuid = mac.upper().replace(":", "")
         return uuid
     except Exception as e:
         log_event(f"Failed to get MAC address: {e}")
         return "DEFAULT-UUID"
 
-# The API base URL remains as before.
 API_BASE_URL = os.getenv("API_BASE_URL", "https://fridge-thing-production.up.railway.app")
-
 # Use the MAC address as the device UUID.
 DEVICE_UUID = get_device_uuid()
 
@@ -66,9 +64,9 @@ def log_event(message: str):
 # Display Helpers
 # -------------------------------------------------------------------------------
 
-def display_message(inky: InkyImpression, message: str):
+def display_message(inky, message: str):
     """
-    Clears the display and shows a text message. This is useful for errors or state feedback.
+    Clears the display and shows a text message. Useful for errors or status updates.
     """
     from PIL import ImageDraw, ImageFont
 
@@ -76,7 +74,7 @@ def display_message(inky: InkyImpression, message: str):
     img = Image.new("P", (inky.WIDTH, inky.HEIGHT), color=inky.WHITE)
     draw = ImageDraw.Draw(img)
     
-    # You can use a custom font if available:
+    # Use a custom font if available:
     try:
         font = ImageFont.truetype("/usr/share/fonts/truetype/freefont/FreeSansBold.ttf", 22)
     except Exception:
@@ -102,7 +100,6 @@ def ping_api() -> dict:
     endpoint = f"{API_BASE_URL}/api/devices/{DEVICE_UUID}/display"
     log_event(f"Pinging API: {endpoint}")
     try:
-        # POST the request (if your API requires POST as in your Arduino firmware)
         response = requests.post(endpoint, timeout=HTTP_TIMEOUT)
         if response.status_code != 200:
             log_event(f"API returned non-200 status: {response.status_code}")
@@ -138,17 +135,16 @@ def download_image(url: str, local_path: str) -> bool:
 # -------------------------------------------------------------------------------
 
 def main():
-    # Initialize the Inky Impression display.
+    # Initialize the Inky display using auto-detection.
     try:
-        # auto() can help choose the right settings for your specific Inky display.
-        inky = auto()  # Alternatively, use: inky = InkyImpression()
+        inky = auto()  # auto() detects the correct display type.
         inky.set_border(inky.WHITE)
         log_event("Display initialized successfully.")
     except Exception as e:
         log_event(f"Display initialization error: {e}")
         sys.exit(1)
     
-    # Begin with an "initializing" message.
+    # Display an initializing message.
     display_message(inky, "Initializing...")
 
     # Ping the API for the next image and wakeup interval.
@@ -167,16 +163,15 @@ def main():
         time.sleep(next_wake_secs)
         return
 
-    # Download the image to the local SD card.
+    # Download the image.
     if not download_image(image_url, LOCAL_IMAGE_PATH):
         display_message(inky, "Download Fail")
         time.sleep(ERROR_RETRY_DELAY)
         return
 
-    # Render the image to the display.
+    # Render the image.
     try:
         img = Image.open(LOCAL_IMAGE_PATH)
-        # Optionally, perform any image processing (rotate, letterbox, etc.) if needed.
         inky.set_image(img)
         inky.show()
         log_event("Image rendered to display.")
@@ -186,7 +181,6 @@ def main():
         time.sleep(ERROR_RETRY_DELAY)
         return
 
-    # Log and "sleep" until the next wakeup time.
     log_event(f"Sleeping for {next_wake_secs} seconds before next update.")
     time.sleep(next_wake_secs)
 
