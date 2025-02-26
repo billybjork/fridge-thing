@@ -4,6 +4,7 @@ import sys
 import time
 import logging
 import requests
+import subprocess
 from datetime import datetime
 from pathlib import Path
 from PIL import Image
@@ -43,12 +44,14 @@ NO_REFRESH_MARKER = "NO_REFRESH"
 
 # Where to save the downloaded image and log file.
 LOCAL_IMAGE_PATH = "/tmp/inky_display.bmp"
+PREVIOUS_IMAGE_PATH = "/tmp/inky_display_previous.bmp"
 LOG_FILE_PATH = os.path.join(LOGS_DIR, "inky_display.log")
 STATE_LOG_PATH = os.path.join(LOGS_DIR, "inky_states.log")
 
 # Timeout settings (in seconds)
 HTTP_TIMEOUT = 10
-ERROR_RETRY_DELAY = 60  # wait 60 sec before retrying on errors
+BASE_ERROR_RETRY_DELAY = 60  # base delay for retries
+MAX_ERROR_RETRY_DELAY = 3600  # max 1 hour delay
 
 # State constants
 STATE_INITIALIZING = "INITIALIZING"
@@ -57,6 +60,14 @@ STATE_DOWNLOAD_ERROR = "DOWNLOAD_ERROR"
 STATE_RENDER_ERROR = "RENDER_ERROR"
 STATE_NO_REFRESH = "NO_REFRESH"
 STATE_DISPLAYING_IMAGE = "DISPLAYING_IMAGE"
+STATE_NO_CHANGE = "NO_CHANGE"
+
+# Log batching settings
+MAX_LOG_BATCH_SIZE = 10
+log_batch = []
+
+# Error retry counter
+retry_attempt = 0
 
 # -------------------------------------------------------------------------------
 # Logging Setup
@@ -82,8 +93,21 @@ state_logger.addHandler(state_handler)
 state_logger.propagate = False  # Don't send to root logger
 
 def log_event(message: str):
-    """Log general events to the main log"""
-    logging.info(message)
+    """Log general events to the main log with batching to reduce I/O"""
+    global log_batch
+    log_batch.append(message)
+    
+    # Only write to log when batch is full or on important messages
+    if len(log_batch) >= MAX_LOG_BATCH_SIZE or "ERROR" in message or "STATE" in message:
+        flush_log_batch()
+
+def flush_log_batch():
+    """Write accumulated log messages to the log file"""
+    global log_batch
+    if log_batch:
+        for msg in log_batch:
+            logging.info(msg)
+        log_batch = []
 
 def log_state(state: str, message: str = ""):
     """Log state changes to the dedicated state log file"""
@@ -100,7 +124,64 @@ def log_state(state: str, message: str = ""):
         logging.error(f"Failed to write to state log: {e}")
     
     # Also log to main logger
-    logging.info(f"STATE CHANGE: {state} - {message}")
+    log_event(f"STATE CHANGE: {state} - {message}")
+    flush_log_batch()  # Ensure state changes are logged immediately
+
+# -------------------------------------------------------------------------------
+# Power Management Functions
+# -------------------------------------------------------------------------------
+
+def enable_power_savings():
+    """Enable various power-saving features on the Pi"""
+    log_event("Enabling power saving features")
+    
+    try:
+        # Disable Bluetooth if not used
+        subprocess.run(["sudo", "rfkill", "block", "bluetooth"], check=False)
+        log_event("Bluetooth disabled")
+        
+    except Exception as e:
+        log_event(f"Error enabling power savings: {e}")
+
+def deep_sleep(seconds):
+    """Put the system into a deep sleep state for the specified duration"""
+    log_event(f"Entering deep sleep for {seconds} seconds")
+    flush_log_batch()  # Ensure all logs are written before sleep
+    
+    # Sync filesystem to avoid data loss
+    subprocess.run(["sync"], check=False)
+    
+    # Use systemd-suspend if available (most power efficient)
+    if os.path.exists("/usr/bin/systemd-suspend"):
+        try:
+            # Set an RTC alarm to wake up after the specified time
+            wake_time = int(time.time()) + seconds
+            subprocess.run(["echo 0 > /sys/class/rtc/rtc0/wakealarm"], shell=True, check=False)
+            subprocess.run([f"echo {wake_time} > /sys/class/rtc/rtc0/wakealarm"], shell=True, check=False)
+            subprocess.run(["systemctl", "suspend"], check=False)
+        except Exception as e:
+            log_event(f"Error during suspend: {e}, falling back to regular sleep")
+            time.sleep(seconds)
+    else:
+        # Fallback to regular sleep if suspend isn't available
+        time.sleep(seconds)
+
+def power_off_display(inky):
+    """Turn off power to the display when not in use"""
+    try:
+        # If your display supports power down mode:
+        if hasattr(inky, "sleep"):
+            inky.sleep()
+            log_event("Display put to sleep")
+    except Exception as e:
+        log_event(f"Error putting display to sleep: {e}")
+
+def get_retry_delay(attempt):
+    """Implement exponential backoff for error retries"""
+    base_delay = BASE_ERROR_RETRY_DELAY  # 1 minute base
+    max_delay = MAX_ERROR_RETRY_DELAY  # Cap at 1 hour
+    delay = min(base_delay * (2 ** (attempt - 1)), max_delay)
+    return delay
 
 # -------------------------------------------------------------------------------
 # Display Helpers
@@ -157,8 +238,15 @@ def ping_api() -> dict:
     """
     endpoint = f"{API_BASE_URL}/api/devices/{DEVICE_UUID}/display"
     log_event(f"Pinging API: {endpoint}")
+    
+    # Add headers to potentially reduce data transfer
+    headers = {
+        'Connection': 'close',  # Don't keep connection open
+        'Accept-Encoding': 'gzip',  # Request compressed responses
+    }
+    
     try:
-        response = requests.post(endpoint, timeout=HTTP_TIMEOUT)
+        response = requests.post(endpoint, headers=headers, timeout=HTTP_TIMEOUT)
         if response.status_code != 200:
             log_event(f"API returned non-200 status: {response.status_code}")
             return {}
@@ -176,16 +264,78 @@ def download_image(url: str, local_path: str) -> bool:
     """
     log_event(f"Downloading image from {url}")
     try:
-        resp = requests.get(url, timeout=HTTP_TIMEOUT)
+        # Add headers to potentially reduce data transfer
+        headers = {
+            'Connection': 'close',  # Don't keep connection open
+            'Accept-Encoding': 'gzip',  # Request compressed responses
+        }
+        
+        resp = requests.get(url, headers=headers, timeout=HTTP_TIMEOUT)
         if resp.status_code != 200:
             log_event(f"Failed to download image; HTTP status: {resp.status_code}")
             return False
         with open(local_path, 'wb') as f:
             f.write(resp.content)
         log_event(f"Image successfully downloaded to {local_path}")
-        return True
+        
+        # Optimize the image for the display
+        return optimize_image_processing(local_path)
     except Exception as e:
         log_event(f"Exception during image download: {e}")
+        return False
+
+def optimize_image_processing(img_path):
+    """Reduce memory usage during image processing and optimize for display"""
+    try:
+        # Initialize display temporarily to get dimensions
+        # Note: This will only be done once in actual implementation
+        # as the inky object is passed from main()
+        try:
+            temp_inky = auto()
+            width, height = temp_inky.WIDTH, temp_inky.HEIGHT
+        except:
+            # Fallbacks if auto-detection fails
+            width, height = 800, 480
+        
+        # Process image with minimal memory usage
+        with Image.open(img_path) as img:
+            # Create a new image with the exact display dimensions to avoid resizing
+            optimized = Image.new("P", (width, height), color=0)
+            
+            # Resize if needed and paste onto our optimized image
+            if img.size != (width, height):
+                img_resized = img.resize((width, height))
+                optimized.paste(img_resized, (0, 0))
+            else:
+                optimized.paste(img, (0, 0))
+                
+            # Save the optimized image back to the same path
+            optimized.save(img_path)
+            
+        log_event(f"Image optimized for display")
+        return True
+    except Exception as e:
+        log_event(f"Error optimizing image: {e}")
+        return False
+
+def images_are_identical(path1, path2):
+    """Check if two images are identical to avoid unnecessary updates"""
+    if not (os.path.exists(path1) and os.path.exists(path2)):
+        return False
+        
+    try:
+        import hashlib
+        
+        # Compare file hashes for quick equality check
+        with open(path1, 'rb') as f1:
+            hash1 = hashlib.md5(f1.read()).hexdigest()
+            
+        with open(path2, 'rb') as f2:
+            hash2 = hashlib.md5(f2.read()).hexdigest()
+            
+        return hash1 == hash2
+    except Exception as e:
+        log_event(f"Error comparing images: {e}")
         return False
 
 # -------------------------------------------------------------------------------
@@ -193,6 +343,8 @@ def download_image(url: str, local_path: str) -> bool:
 # -------------------------------------------------------------------------------
 
 def main():
+    global retry_attempt
+    
     # Initialize the Inky display using auto-detection.
     try:
         inky = auto()  # auto() detects the correct display type.
@@ -204,6 +356,8 @@ def main():
     
     # Display an initializing message only on first run
     if not hasattr(main, 'initialized'):
+        # Enable power saving features on first run
+        enable_power_savings()
         display_message(inky, "Initializing...", STATE_INITIALIZING)
         main.initialized = True
     else:
@@ -213,9 +367,17 @@ def main():
     # Ping the API for the next image and wakeup interval.
     api_data = ping_api()
     if not api_data:
+        retry_attempt += 1
+        delay = get_retry_delay(retry_attempt)
         display_message(inky, "API Error", STATE_API_ERROR)
-        time.sleep(ERROR_RETRY_DELAY)
+        
+        # Turn off the display to save power during the error wait
+        power_off_display(inky)
+        deep_sleep(delay)
         return
+    
+    # Reset retry counter on successful API call
+    retry_attempt = 0
 
     image_url = api_data.get("image_url", "")
     next_wake_secs = int(api_data.get("next_wake_secs", 3600))
@@ -224,15 +386,41 @@ def main():
         log_event("Received NO_REFRESH marker; skipping image update.")
         # Just log this state, don't update display
         log_state(STATE_NO_REFRESH, f"Next update in {next_wake_secs}s")
-        time.sleep(next_wake_secs)
+        
+        # Turn off the display to save power
+        power_off_display(inky)
+        deep_sleep(next_wake_secs)
         return
+
+    # Backup the current image if it exists
+    if os.path.exists(LOCAL_IMAGE_PATH):
+        try:
+            import shutil
+            shutil.copy2(LOCAL_IMAGE_PATH, PREVIOUS_IMAGE_PATH)
+        except Exception as e:
+            log_event(f"Error backing up image: {e}")
 
     # Download the image.
     if not download_image(image_url, LOCAL_IMAGE_PATH):
+        retry_attempt += 1
+        delay = get_retry_delay(retry_attempt)
         display_message(inky, "Download Fail", STATE_DOWNLOAD_ERROR)
-        time.sleep(ERROR_RETRY_DELAY)
+        
+        # Turn off the display to save power during the error wait
+        power_off_display(inky)
+        deep_sleep(delay)
         return
 
+    # Check if the image is identical to the previous one
+    if images_are_identical(LOCAL_IMAGE_PATH, PREVIOUS_IMAGE_PATH):
+        log_event("New image is identical to current display; skipping update")
+        log_state(STATE_NO_CHANGE, f"Next update in {next_wake_secs}s")
+        
+        # Turn off the display to save power
+        power_off_display(inky)
+        deep_sleep(next_wake_secs)
+        return
+    
     # Render the image.
     try:
         img = Image.open(LOCAL_IMAGE_PATH)
@@ -240,13 +428,25 @@ def main():
         inky.show()
         log_state(STATE_DISPLAYING_IMAGE, f"Image from {image_url}")
     except Exception as e:
+        retry_attempt += 1
+        delay = get_retry_delay(retry_attempt)
         log_event(f"Error rendering image: {e}")
         display_message(inky, "Render Error", STATE_RENDER_ERROR)
-        time.sleep(ERROR_RETRY_DELAY)
+        
+        # Turn off the display to save power during the error wait
+        power_off_display(inky)
+        deep_sleep(delay)
         return
 
+    # Reset retry counter on successful display
+    retry_attempt = 0
+    
     log_event(f"Sleeping for {next_wake_secs} seconds before next update.")
-    time.sleep(next_wake_secs)
+    flush_log_batch()  # Make sure logs are written before sleep
+    
+    # Turn off the display to save power
+    power_off_display(inky)
+    deep_sleep(next_wake_secs)
 
 # -------------------------------------------------------------------------------
 # Main Loop
@@ -259,14 +459,21 @@ if __name__ == '__main__':
     log_event(device_info)
     log_state("SERVICE_START", device_info)
     
+    # Configure low-power mode on startup
+    enable_power_savings()
+    
     try:
         while True:
             main()
+            # Ensure logs are flushed between cycles
+            flush_log_batch()
     except KeyboardInterrupt:
         log_event("Service stopped by user")
         log_state("SERVICE_STOP", "User interrupt")
+        flush_log_batch()
         sys.exit(0)
     except Exception as e:
         log_event(f"Unhandled exception: {e}")
         log_state("SERVICE_CRASH", str(e))
+        flush_log_batch()
         sys.exit(1)
