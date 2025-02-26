@@ -120,38 +120,21 @@ float voltageToPercent(float voltage) {
 }
 
 /**
- * Log an event to "log.txt" on the SD card with a timestamp from RTC.
- * Uses the device's Real Time Clock instead of millis() for accurate timestamping.
+ * Log an event to "log.txt" on the SD card with a timestamp.
+ * We use millis() as a simple timestamp.
  */
 void logEvent(const char* message) {
     if (!sdCardAvailable) {
         Serial.println("SD card not available for logging.");
         return;
     }
-    
     SdFile logFile;
     // Open the log file in append mode.
     if (!logFile.open("/log.txt", O_WRITE | O_CREAT | O_APPEND)) {
         Serial.println("ERROR: Could not open log file.");
         return;
     }
-    
-    // Get current date and time from RTC
-    display.rtcGetRtcData();
-    
-    uint8_t second = display.rtcGetSecond();
-    uint8_t minute = display.rtcGetMinute();
-    uint8_t hour = display.rtcGetHour();
-    uint8_t day = display.rtcGetDay();
-    uint8_t month = display.rtcGetMonth();
-    uint8_t year = display.rtcGetYear();
-    
-    // Format: YYYY-MM-DD HH:MM:SS: message
-    char timestamp[20];
-    sprintf(timestamp, "20%02d-%02d-%02d %02d:%02d:%02d", 
-            year, month, day, hour, minute, second);
-    
-    String logLine = String(timestamp) + ": " + message + "\n";
+    String logLine = String(millis()) + ": " + message + "\n";
     logFile.write((const uint8_t*)logLine.c_str(), logLine.length());
     logFile.close();
 }
@@ -162,36 +145,33 @@ void logEvent(const char* message) {
  * When an image is fully rendered, this function does nothing.
  */
 void updateStateDisplay(bool fullRefresh = true) {
-    // Do not update the overlay when the image is fully displayed with no errors.
-    if (currentState == STATE_DISPLAYING_IMAGE && errorCode == ERROR_NONE) {
+    // Only update the display for critical states that require user attention
+    // Skip updates for transitional states to avoid unnecessary refreshes
+    if (currentState != STATE_ERROR && 
+        currentState != STATE_CAPTIVE_PORTAL && 
+        currentState != STATE_DISPLAYING_IMAGE && 
+        errorCode != ERROR_LOW_BATTERY) {
+        // Just log the state change but don't refresh display
+        Serial.println("State display update skipped for non-critical state");
         return;
     }
     
     if (fullRefresh) {
         display.clearDisplay();
     }
+    
     display.setTextColor(BLACK);
     display.setTextSize(2);
     display.setCursor(10, 10);
+    
     switch (currentState) {
-        case STATE_INITIALIZING:
-            display.print("Initializing...");
-            break;
         case STATE_CAPTIVE_PORTAL:
             display.print("Wi-Fi Setup Mode");
             break;
-        case STATE_CONNECTING_WIFI:
-            display.print("Connecting Wi-Fi...");
-            break;
-        case STATE_CHECKING_UPDATE:
-            display.print("Checking updates...");
-            break;
-        case STATE_UPDATING_FW:
-            display.print("Updating firmware...");
-            break;
-        case STATE_FETCHING_IMAGE:
-            display.print("Fetching image...");
-            break;
+        case STATE_DISPLAYING_IMAGE:
+            // For displaying image state, we don't need to show text overlay
+            // The actual image will be shown by fetchAndDisplayImage()
+            return;
         case STATE_ERROR:
             display.print("ERROR: ");
             switch (errorCode) {
@@ -218,8 +198,10 @@ void updateStateDisplay(bool fullRefresh = true) {
             }
             break;
         default:
-            display.print("State " + String(currentState));
+            // For all other states, skip the display update
+            return;
     }
+    
     display.display();
 }
 
@@ -244,8 +226,17 @@ void setState(int newState, int newErrorCode = ERROR_NONE) {
     Serial.println(stateMsg);
     logEvent(stateMsg.c_str());
     
-    // Update overlay only for states that require user feedback.
-    updateStateDisplay();
+    // Only update display for critical states that require user feedback
+    // This prevents unnecessary e-ink refreshes for transitional states
+    bool isCriticalState = (
+        newState == STATE_ERROR ||
+        newState == STATE_CAPTIVE_PORTAL ||
+        newErrorCode == ERROR_LOW_BATTERY
+    );
+    
+    if (isCriticalState) {
+        updateStateDisplay();
+    }
 }
 
 /**
@@ -637,19 +628,6 @@ void startCaptivePortal() {
 void setup() {
     Serial.begin(115200);
     Serial.println("\n\nFridge Thing starting up...");
-    
-    // Initialize display first
-    display.begin();
-    
-    // Initialize RTC if needed (only needed on first boot)
-    display.rtcGetRtcData();
-    if (display.rtcGetYear() < 20) {  // Basic check if RTC needs to be set (year before 2020)
-        Serial.println("RTC time not set, initializing to default time...");
-        // Set a default time (you can adjust this)
-        display.rtcSetTime(12, 0, 0);  // 12:00:00
-        display.rtcSetDate(1, 1, 1, 23);  // Monday, Jan 1, 2023
-    }
-    
     logEvent("Fridge Thing starting up...");
     
     // Increment boot count (persistent across deep sleep)
@@ -677,9 +655,7 @@ void setup() {
     currentState = STATE_INITIALIZING;
     
     display.begin();
-    // Show initial state overlay (if needed)
-    updateStateDisplay();
-    
+
     // Initialize SD card.
     sdCardAvailable = display.sdCardInit();
     if (!sdCardAvailable) {
