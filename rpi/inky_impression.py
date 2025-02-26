@@ -4,7 +4,10 @@ import sys
 import time
 import logging
 import requests
-from datetime import datetime
+import hashlib
+import json
+import subprocess
+from datetime import datetime, timedelta
 from pathlib import Path
 from PIL import Image
 from logging.handlers import RotatingFileHandler
@@ -32,7 +35,12 @@ def get_device_uuid() -> str:
 
 # Create logs directory if it doesn't exist
 LOGS_DIR = "/home/pi/inky_logs"
+DATA_DIR = "/home/pi/inky_data"
 os.makedirs(LOGS_DIR, exist_ok=True)
+os.makedirs(DATA_DIR, exist_ok=True)
+
+# Configuration file for storing state between runs
+CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
 
 API_BASE_URL = os.getenv("API_BASE_URL", "https://fridge-thing-production.up.railway.app")
 # Use the MAC address as the device UUID.
@@ -41,8 +49,9 @@ DEVICE_UUID = get_device_uuid()
 # When the API returns "NO_REFRESH", it means no image update during a no‑refresh period.
 NO_REFRESH_MARKER = "NO_REFRESH"
 
-# Where to save the downloaded image and log file.
-LOCAL_IMAGE_PATH = "/tmp/inky_display.bmp"
+# Where to save the downloaded image and log files
+LOCAL_IMAGE_PATH = os.path.join(DATA_DIR, "inky_display.bmp")
+LAST_IMAGE_PATH = os.path.join(DATA_DIR, "last_display.bmp")
 LOG_FILE_PATH = os.path.join(LOGS_DIR, "inky_display.log")
 STATE_LOG_PATH = os.path.join(LOGS_DIR, "inky_states.log")
 
@@ -57,6 +66,128 @@ STATE_DOWNLOAD_ERROR = "DOWNLOAD_ERROR"
 STATE_RENDER_ERROR = "RENDER_ERROR"
 STATE_NO_REFRESH = "NO_REFRESH"
 STATE_DISPLAYING_IMAGE = "DISPLAYING_IMAGE"
+STATE_POWER_SAVING = "POWER_SAVING"
+
+# Power saving settings
+NIGHT_MODE_START = 23  # 11 PM
+NIGHT_MODE_END = 6     # 6 AM
+NIGHT_MODE_INTERVAL = 3 * 3600  # 3 hours in seconds
+MIN_BATTERY_PCT = 15   # Percentage below which to enter power saving mode
+
+# -------------------------------------------------------------------------------
+# System Power Management
+# -------------------------------------------------------------------------------
+
+def enable_power_savings():
+    """Enable various system-level power saving features"""
+    try:
+        # Enable WiFi power management
+        os.system("sudo iwconfig wlan0 power on")
+        
+        # Set CPU to powersave governor
+        os.system("echo powersave | sudo tee /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor > /dev/null")
+        
+        # Disable Bluetooth if available
+        os.system("sudo systemctl stop bluetooth.service")
+        os.system("sudo rfkill block bluetooth")
+        
+        log_event("Power saving features enabled")
+    except Exception as e:
+        log_event(f"Error enabling power savings: {e}")
+
+def get_battery_percentage():
+    """
+    Get battery percentage if available.
+    This assumes you have a UPS/battery HAT with i2c interface.
+    Modify according to your specific hardware.
+    """
+    try:
+        # This is an example for a typical battery monitoring HAT
+        # Adjust according to your specific hardware
+        result = subprocess.run(['i2cget', '-y', '1', '0x36', '0x04'], 
+                              capture_output=True, text=True)
+        if result.returncode == 0:
+            value = int(result.stdout.strip(), 16)
+            percentage = min(100, max(0, value))
+            return percentage
+    except Exception as e:
+        log_event(f"Battery monitoring error: {e}")
+    
+    # Return default if not available
+    return 100
+
+def schedule_next_wakeup(seconds):
+    """
+    Schedule the next wakeup using systemd or RTC if available.
+    This function schedules a wakeup and then shuts down the Pi.
+    """
+    wakeup_time = datetime.now() + timedelta(seconds=seconds)
+    log_event(f"Scheduling next wakeup at {wakeup_time}")
+    
+    # Save when we should next wake up
+    save_config({"next_wakeup": wakeup_time.timestamp(), 
+                "wakeup_seconds": seconds})
+    
+    try:
+        # Method 1: Using RTC (if you have a hardware RTC)
+        # Uncomment and adjust for your specific RTC hardware
+        # rtc_time = wakeup_time.strftime("%y %m %d %H %M %S")
+        # os.system(f"sudo hwclock --set --date='{rtc_time}'")
+        # os.system("sudo shutdown -h now")
+        
+        # Method 2: Using systemd timer (more compatible)
+        # Create systemd wakeup timer
+        timer_time = seconds
+        os.system(f"sudo shutdown -h +{timer_time//60}")
+        
+        log_state(STATE_POWER_SAVING, f"Shutting down for {seconds} seconds")
+    except Exception as e:
+        log_event(f"Error scheduling shutdown: {e}")
+
+def is_night_time():
+    """Check if current time is within night time hours"""
+    current_hour = datetime.now().hour
+    if NIGHT_MODE_START <= current_hour or current_hour < NIGHT_MODE_END:
+        return True
+    return False
+
+# -------------------------------------------------------------------------------
+# Configuration Management
+# -------------------------------------------------------------------------------
+
+def load_config():
+    """Load configuration from file"""
+    try:
+        if os.path.exists(CONFIG_FILE):
+            with open(CONFIG_FILE, 'r') as f:
+                return json.load(f)
+    except Exception as e:
+        log_event(f"Error loading config: {e}")
+    return {}
+
+def save_config(config):
+    """Save configuration to file"""
+    try:
+        # Merge with existing config
+        existing = load_config()
+        existing.update(config)
+        
+        with open(CONFIG_FILE, 'w') as f:
+            json.dump(existing, f)
+    except Exception as e:
+        log_event(f"Error saving config: {e}")
+
+def calculate_image_hash(image_path):
+    """Calculate a hash of the image file to detect changes"""
+    try:
+        if not os.path.exists(image_path):
+            return None
+            
+        with open(image_path, 'rb') as f:
+            return hashlib.md5(f.read()).hexdigest()
+    except Exception as e:
+        log_event(f"Error calculating image hash: {e}")
+        return None
 
 # -------------------------------------------------------------------------------
 # Logging Setup
@@ -141,6 +272,11 @@ def display_message(inky, message: str, state: str):
     # Draw the message near the top-left of the display.
     draw.text((10, 10), message, fill=inky.BLACK, font=font)
     
+    # Add power info if available
+    battery_pct = get_battery_percentage()
+    if battery_pct < 100:
+        draw.text((10, inky.HEIGHT - 30), f"Battery: {battery_pct}%", fill=inky.BLACK, font=font)
+    
     inky.set_image(img)
     inky.show()
     log_event(f"Display updated with message: '{message}'")
@@ -157,8 +293,17 @@ def ping_api() -> dict:
     """
     endpoint = f"{API_BASE_URL}/api/devices/{DEVICE_UUID}/display"
     log_event(f"Pinging API: {endpoint}")
+    
+    # Get battery percentage
+    battery_pct = get_battery_percentage()
+    
     try:
-        response = requests.post(endpoint, timeout=HTTP_TIMEOUT)
+        # Include battery info in the API request
+        payload = {
+            "battery_pct": battery_pct
+        }
+        
+        response = requests.post(endpoint, json=payload, timeout=HTTP_TIMEOUT)
         if response.status_code != 200:
             log_event(f"API returned non-200 status: {response.status_code}")
             return {}
@@ -193,7 +338,24 @@ def download_image(url: str, local_path: str) -> bool:
 # -------------------------------------------------------------------------------
 
 def main():
-    # Initialize the Inky display using auto-detection.
+    # Enable power saving features
+    enable_power_savings()
+    
+    # Load configuration
+    config = load_config()
+    
+    # Check battery level
+    battery_pct = get_battery_percentage()
+    log_event(f"Battery level: {battery_pct}%")
+    
+    # Enter power saving mode if battery is low
+    if battery_pct < MIN_BATTERY_PCT:
+        log_state(STATE_POWER_SAVING, f"Low battery ({battery_pct}%)")
+        # Wait longer when battery is low
+        schedule_next_wakeup(3 * 3600)  # 3 hours
+        sys.exit(0)
+    
+    # Initialize the Inky display using auto-detection
     try:
         inky = auto()  # auto() detects the correct display type.
         inky.set_border(inky.WHITE)
@@ -203,53 +365,88 @@ def main():
         sys.exit(1)
     
     # Display an initializing message only on first run
-    if not hasattr(main, 'initialized'):
+    if not os.path.exists(CONFIG_FILE):
         display_message(inky, "Initializing...", STATE_INITIALIZING)
-        main.initialized = True
     else:
         # For subsequent runs, just log without display update
         log_event("Starting update cycle")
 
-    # Ping the API for the next image and wakeup interval.
+    # Ping the API for the next image and wakeup interval
     api_data = ping_api()
     if not api_data:
         display_message(inky, "API Error", STATE_API_ERROR)
-        time.sleep(ERROR_RETRY_DELAY)
-        return
+        # Schedule a retry with shorter interval
+        schedule_next_wakeup(ERROR_RETRY_DELAY)
+        sys.exit(0)
 
     image_url = api_data.get("image_url", "")
     next_wake_secs = int(api_data.get("next_wake_secs", 3600))
+
+    # Check if we should use night mode schedule
+    if is_night_time():
+        log_event("Night mode active, using longer refresh interval")
+        next_wake_secs = max(next_wake_secs, NIGHT_MODE_INTERVAL)
 
     if image_url == NO_REFRESH_MARKER:
         log_event("Received NO_REFRESH marker; skipping image update.")
         # Just log this state, don't update display
         log_state(STATE_NO_REFRESH, f"Next update in {next_wake_secs}s")
-        time.sleep(next_wake_secs)
-        return
+        schedule_next_wakeup(next_wake_secs)
+        sys.exit(0)
 
-    # Download the image.
+    # Download the image
     if not download_image(image_url, LOCAL_IMAGE_PATH):
         display_message(inky, "Download Fail", STATE_DOWNLOAD_ERROR)
-        time.sleep(ERROR_RETRY_DELAY)
-        return
+        schedule_next_wakeup(ERROR_RETRY_DELAY)
+        sys.exit(0)
 
-    # Render the image.
+    # Compare with previous image to see if it's changed
+    current_hash = calculate_image_hash(LOCAL_IMAGE_PATH)
+    previous_hash = config.get('last_image_hash')
+    
+    # If image is the same as before, we can potentially skip
+    if current_hash and previous_hash and current_hash == previous_hash:
+        log_event("Image unchanged from previous display")
+        # Still render if it's been a long time since last refresh
+        last_refresh_time = config.get('last_refresh_time', 0)
+        time_since_refresh = time.time() - last_refresh_time
+        
+        if time_since_refresh < 24 * 3600:  # If less than 24 hours, skip
+            log_event("Skipping refresh as image is unchanged")
+            # Save the hash
+            save_config({'last_image_hash': current_hash})
+            schedule_next_wakeup(next_wake_secs)
+            sys.exit(0)
+    
+    # Render the image
     try:
         img = Image.open(LOCAL_IMAGE_PATH)
         inky.set_image(img)
         inky.show()
         log_state(STATE_DISPLAYING_IMAGE, f"Image from {image_url}")
+        
+        # Save image hash and refresh time
+        save_config({
+            'last_image_hash': current_hash,
+            'last_refresh_time': time.time()
+        })
+        
+        # Copy to last image location
+        import shutil
+        shutil.copy(LOCAL_IMAGE_PATH, LAST_IMAGE_PATH)
+        
     except Exception as e:
         log_event(f"Error rendering image: {e}")
         display_message(inky, "Render Error", STATE_RENDER_ERROR)
-        time.sleep(ERROR_RETRY_DELAY)
-        return
+        schedule_next_wakeup(ERROR_RETRY_DELAY)
+        sys.exit(0)
 
-    log_event(f"Sleeping for {next_wake_secs} seconds before next update.")
-    time.sleep(next_wake_secs)
+    log_event(f"Scheduling next wake in {next_wake_secs} seconds")
+    schedule_next_wakeup(next_wake_secs)
+    sys.exit(0)
 
 # -------------------------------------------------------------------------------
-# Main Loop
+# Main Entry Point
 # -------------------------------------------------------------------------------
 
 if __name__ == '__main__':
@@ -260,8 +457,7 @@ if __name__ == '__main__':
     log_state("SERVICE_START", device_info)
     
     try:
-        while True:
-            main()
+        main()
     except KeyboardInterrupt:
         log_event("Service stopped by user")
         log_state("SERVICE_STOP", "User interrupt")
