@@ -11,6 +11,7 @@
 #include <Inkplate.h>
 #include <esp_sleep.h>
 #include <HTTPUpdate.h>
+#include <esp_wifi.h>
 
 // RTC_DATA_ATTR makes this variable persist across deep sleep cycles
 RTC_DATA_ATTR int bootCount = 0;
@@ -24,7 +25,7 @@ AsyncWebServer server(80);
 DNSServer dnsServer;
 
 // OTA configuration
-const char* currentFirmwareVersion = "1.3";  // Current firmware version
+const char* currentFirmwareVersion = "1.4";  // Current firmware version
 const char* versionCheckURL = "https://s3.us-west-1.amazonaws.com/bjork.love/fridge-thing-firmware/version.txt";
 const char* firmwareURL = "https://s3.us-west-1.amazonaws.com/bjork.love/fridge-thing-firmware/firmware.ino.bin";
 
@@ -120,94 +121,74 @@ float voltageToPercent(float voltage) {
 }
 
 /**
- * Log an event to "log.txt" on the SD card with a timestamp.
- * We use millis() as a simple timestamp.
+ * Format numbers with leading zeros for timestamps.
+ */
+String formatNumber(int num) {
+    if (num < 10)
+        return "0" + String(num);
+    return String(num);
+}
+
+/**
+ * Log an event to "log.txt" on the SD card with a timestamp from the RTC.
  */
 void logEvent(const char* message) {
     if (!sdCardAvailable) {
         Serial.println("SD card not available for logging.");
         return;
     }
+    
     SdFile logFile;
     // Open the log file in append mode.
     if (!logFile.open("/log.txt", O_WRITE | O_CREAT | O_APPEND)) {
         Serial.println("ERROR: Could not open log file.");
         return;
     }
-    String logLine = String(millis()) + ": " + message + "\n";
+    
+    // Get current date and time from RTC
+    display.rtcGetRtcData();
+    
+    uint8_t second = display.rtcGetSecond();
+    uint8_t minute = display.rtcGetMinute();
+    uint8_t hour = display.rtcGetHour();
+    uint8_t day = display.rtcGetDay();
+    uint8_t month = display.rtcGetMonth();
+    uint8_t year = display.rtcGetYear();
+    
+    // Format: YYYY-MM-DD HH:MM:SS: message
+    char timestamp[20];
+    sprintf(timestamp, "20%02d-%02d-%02d %02d:%02d:%02d", 
+            year, month, day, hour, minute, second);
+    
+    String logLine = String(timestamp) + ": " + message + "\n";
     logFile.write((const uint8_t*)logLine.c_str(), logLine.length());
     logFile.close();
+    
+    // Also print to Serial for debugging.
+    Serial.println(logLine);
 }
 
 /**
- * Update the display to show the current state message.
- * The overlay is only shown in transitional, error, or low‑battery states.
- * When an image is fully rendered, this function does nothing.
+ * Update the display with the captive portal instructions.
+ * Since the e-paper takes 30 seconds to refresh, we only update the screen in captive portal mode.
  */
 void updateStateDisplay(bool fullRefresh = true) {
-    // Only update the display for critical states that require user attention
-    // Skip updates for transitional states to avoid unnecessary refreshes
-    if (currentState != STATE_ERROR && 
-        currentState != STATE_CAPTIVE_PORTAL && 
-        currentState != STATE_DISPLAYING_IMAGE && 
-        errorCode != ERROR_LOW_BATTERY) {
-        // Just log the state change but don't refresh display
-        Serial.println("State display update skipped for non-critical state");
-        return;
-    }
+    // Only update display in captive portal mode.
+    if (currentState != STATE_CAPTIVE_PORTAL) return;
     
     if (fullRefresh) {
         display.clearDisplay();
     }
-    
     display.setTextColor(BLACK);
     display.setTextSize(2);
     display.setCursor(10, 10);
-    
-    switch (currentState) {
-        case STATE_CAPTIVE_PORTAL:
-            display.print("Wi-Fi Setup Mode");
-            break;
-        case STATE_DISPLAYING_IMAGE:
-            // For displaying image state, we don't need to show text overlay
-            // The actual image will be shown by fetchAndDisplayImage()
-            return;
-        case STATE_ERROR:
-            display.print("ERROR: ");
-            switch (errorCode) {
-                case ERROR_WIFI_CONNECT:
-                    display.print("Wi-Fi failed");
-                    break;
-                case ERROR_SERVER_CONNECT:
-                    display.print("Server error");
-                    break;
-                case ERROR_IMAGE_DOWNLOAD:
-                    display.print("Img download fail");
-                    break;
-                case ERROR_SD_CARD:
-                    display.print("SD card error");
-                    break;
-                case ERROR_OTA_UPDATE:
-                    display.print("OTA update fail");
-                    break;
-                case ERROR_LOW_BATTERY:
-                    display.print("Battery critical");
-                    break;
-                default:
-                    display.print("Unknown error");
-            }
-            break;
-        default:
-            // For all other states, skip the display update
-            return;
-    }
-    
+    display.print("Wi-Fi Setup Mode");
     display.display();
 }
 
 /**
- * Set the current state and error code, store them persistently, update the display (if needed),
- * and log the event.
+ * Set the current state and error code, store them persistently, and log the event.
+ * Note: updateStateDisplay() is called here but will only update the screen in captive portal mode.
  */
 void setState(int newState, int newErrorCode = ERROR_NONE) {
     preferences.begin("state", false);
@@ -226,17 +207,7 @@ void setState(int newState, int newErrorCode = ERROR_NONE) {
     Serial.println(stateMsg);
     logEvent(stateMsg.c_str());
     
-    // Only update display for critical states that require user feedback
-    // This prevents unnecessary e-ink refreshes for transitional states
-    bool isCriticalState = (
-        newState == STATE_ERROR ||
-        newState == STATE_CAPTIVE_PORTAL ||
-        newErrorCode == ERROR_LOW_BATTERY
-    );
-    
-    if (isCriticalState) {
-        updateStateDisplay();
-    }
+    updateStateDisplay();
 }
 
 /**
@@ -367,9 +338,6 @@ bool downloadToSD(const String &imageUrl, const String &localPath, WiFiClient &c
 /**
  * Fetch a BMP image from the server, save it to SD, render it, and then schedule deep sleep.
  * Battery information is included in the server request.
- * 
- * In normal operation, once the image is successfully rendered the overlay is not updated,
- * leaving the image on screen.
  */
 void fetchAndDisplayImage() {
     setState(STATE_FETCHING_IMAGE);
@@ -423,6 +391,10 @@ void fetchAndDisplayImage() {
         esp_sleep_enable_timer_wakeup(60 * 1000000ULL);
         esp_sleep_enable_ext0_wakeup(GPIO_NUM_36, 0);
         setState(STATE_SLEEPING);
+        // Disable WiFi to save battery before deep sleep.
+        WiFi.disconnect();
+        WiFi.mode(WIFI_OFF);
+        esp_wifi_stop();
         delay(1000);
         esp_deep_sleep_start();
         return;
@@ -461,6 +433,10 @@ void fetchAndDisplayImage() {
         esp_sleep_enable_timer_wakeup(60 * 1000000ULL);
         esp_sleep_enable_ext0_wakeup(GPIO_NUM_36, 0);
         setState(STATE_SLEEPING);
+        // Disable WiFi to save battery before deep sleep.
+        WiFi.disconnect();
+        WiFi.mode(WIFI_OFF);
+        esp_wifi_stop();
         delay(1000);
         esp_deep_sleep_start();
         return;
@@ -497,8 +473,11 @@ void fetchAndDisplayImage() {
     // Enable external wakeup on GPIO36 (wake-up button).
     esp_sleep_enable_ext0_wakeup(GPIO_NUM_36, 0);
     
-    // Log and enter deep sleep immediately (without updating the display).
     logEvent("Entering sleep mode.");
+    // Disable WiFi to save battery before deep sleep.
+    WiFi.disconnect();
+    WiFi.mode(WIFI_OFF);
+    esp_wifi_stop();
     delay(1000);
     esp_deep_sleep_start();
 }
@@ -621,21 +600,45 @@ void startCaptivePortal() {
 }
 
 /**
- * Setup: initialize display, SD card, Wi-Fi, state, and decide whether to start normal operation or captive portal.
- * Also, increment the boot count and log the wake-up cause so you can tell if the wake was manual (via button)
- * or from the timer.
+ * Setup: initialize display, RTC, SD card, Wi-Fi, state, and decide whether to start normal operation or captive portal.
+ * Also, increment the boot count and log the wake-up cause.
  */
 void setup() {
     Serial.begin(115200);
+    // Disable Bluetooth to save power, as it's not used.
+    btStop();
     Serial.println("\n\nFridge Thing starting up...");
+    
+    // Initialize display and RTC
+    display.begin();
+    display.rtcGetRtcData();
+    
+    // If the RTC does not appear to be set (year < 20), set a default time.
+    if (display.rtcGetYear() < 20) {
+        Serial.println("RTC not set; initializing with default time and date...");
+        display.rtcSetTime(14, 10, 0); // Hours, Minutes, Seconds
+        display.rtcSetDate(6, 3, 8, 25); // Weekday (1 = Monday), Month, Day, Year
+        
+        // Optional: RTC calibration
+        display.rtcSetInternalCapacitor(RTC_12_5PF);
+        display.rtcSetClockOffset(1, -63); // Adjust offset as needed
+    }
+    
     logEvent("Fridge Thing starting up...");
     
     // Increment boot count (persistent across deep sleep)
     bootCount++;
-    Serial.println("Boot count: " + String(bootCount));
+    
+    // Initialize SD card before logging.
+    sdCardAvailable = display.sdCardInit();
+    if (!sdCardAvailable) {
+        Serial.println("SD init failed. Continuing without SD storage.");
+    }
+    
+    logEvent("Fridge Thing starting up...");
     logEvent(("Boot count: " + String(bootCount)).c_str());
     
-    // Determine wakeup cause
+    // Determine wakeup cause.
     esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
     String wakeupMsg;
     switch (wakeup_reason) {
@@ -649,33 +652,26 @@ void setup() {
             wakeupMsg = "Wakeup cause unknown";
             break;
     }
-    Serial.println(wakeupMsg);
     logEvent(wakeupMsg.c_str());
     
     currentState = STATE_INITIALIZING;
     
-    display.begin();
-
-    // Initialize SD card.
-    sdCardAvailable = display.sdCardInit();
-    if (!sdCardAvailable) {
-        Serial.println("SD init failed. Continuing without SD storage.");
-        logEvent("SD init failed.");
-        setState(STATE_ERROR, ERROR_SD_CARD);
-        delay(3000);
-    }
+    // The display is not updated with transitional messages. It will either show the fetched image
+    // or, if needed, the captive portal instructions.
     
     // Check battery before continuing.
     double voltage = display.readBattery();
     float batteryPercent = voltageToPercent(voltage);
     String battMsg = "Battery: " + String(batteryPercent, 1) + "% (" + String(voltage, 2) + "V)";
-    Serial.println(battMsg);
     logEvent(battMsg.c_str());
     if (batteryPercent < BATTERY_CRITICAL_PCT) {
-        Serial.println("CRITICAL: Battery too low!");
         logEvent("CRITICAL: Battery too low!");
         setState(STATE_ERROR, ERROR_LOW_BATTERY);
         delay(5000);
+        // Disable WiFi to save battery before deep sleep.
+        WiFi.disconnect();
+        WiFi.mode(WIFI_OFF);
+        esp_wifi_stop();
         esp_sleep_enable_timer_wakeup(3600 * 1000000ULL); // Sleep for 1 hour.
         esp_sleep_enable_ext0_wakeup(GPIO_NUM_36, 0);
         setState(STATE_SLEEPING);
@@ -692,7 +688,6 @@ void setup() {
     
     // Check wakeup reason (cold boot vs. wake from sleep).
     if (wakeup_reason == ESP_SLEEP_WAKEUP_TIMER || wakeup_reason == ESP_SLEEP_WAKEUP_EXT0) {
-        Serial.println("Woke from deep sleep");
         logEvent("Woke from deep sleep");
         if (storedSSID != "") {
             setState(STATE_CONNECTING_WIFI);
@@ -708,7 +703,6 @@ void setup() {
                 attempts++;
             }
             if (WiFi.status() == WL_CONNECTED) {
-                Serial.println("\nWi-Fi connected!");
                 logEvent("Wi-Fi connected on wakeup.");
                 Serial.print("IP: ");
                 Serial.println(WiFi.localIP());
@@ -716,7 +710,6 @@ void setup() {
                 fetchAndDisplayImage();
                 return;
             } else {
-                Serial.println("\nWi-Fi connection failed on wakeup.");
                 logEvent("Wi-Fi connection failed on wakeup.");
                 setState(STATE_ERROR, ERROR_WIFI_CONNECT);
                 delay(3000);
@@ -738,7 +731,6 @@ void setup() {
                 attempts++;
             }
             if (WiFi.status() == WL_CONNECTED) {
-                Serial.println("\nWi-Fi connected!");
                 logEvent("Wi-Fi connected on cold boot.");
                 Serial.print("IP: ");
                 Serial.println(WiFi.localIP());
@@ -749,7 +741,7 @@ void setup() {
         }
     }
     
-    // If Wi-Fi connection fails or no credentials, start captive portal.
+    // If Wi-Fi connection fails or no credentials, start the captive portal.
     startCaptivePortal();
 }
 
@@ -765,6 +757,10 @@ void loop() {
             Serial.println("Captive portal timeout; going to sleep.");
             logEvent("Captive portal timeout; going to sleep.");
             setState(STATE_SLEEPING);
+            // Disable WiFi to save battery before deep sleep.
+            WiFi.disconnect();
+            WiFi.mode(WIFI_OFF);
+            esp_wifi_stop();
             esp_sleep_enable_timer_wakeup(30ULL * 1000000ULL); // Sleep for 30 seconds.
             esp_sleep_enable_ext0_wakeup(GPIO_NUM_36, 0);
             delay(1000);
