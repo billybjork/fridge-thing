@@ -548,18 +548,17 @@ void fetchAndDisplayImage() {
     doc["battery_pct"] = batteryPercent;
     doc["battery_voltage"] = voltage;
     
-    // Add flag to request time sync from server
-    display.rtcGetRtcData();
-    uint8_t rtcYear = display.rtcGetYear();
-    uint8_t rtcMonth = display.rtcGetMonth();
-    uint8_t rtcDay = display.rtcGetDay();
-    bool needsTimeSync = rtcYear < 23 || rtcYear > 99 || rtcMonth < 1 || rtcMonth > 12 || rtcDay < 1 || rtcDay > 31;
+    // DEBUGGING: Always request time sync for testing
+    doc["request_time_sync"] = true;
     
-    // Request time sync if needed or periodically
-    doc["request_time_sync"] = needsTimeSync || (bootCount % 24 == 0);
+    Serial.println("Sending request with request_time_sync=true");
+    logEvent("Sending request with request_time_sync=true");
     
     String body;
     serializeJson(doc, body);
+    Serial.println("Request body: " + body);
+    logEvent(("Request body: " + body).c_str());
+    
     int httpCode = http.POST(body);
     if (httpCode != 200) {
         String errMsg = "ERROR: POST code=" + String(httpCode);
@@ -600,11 +599,21 @@ void fetchAndDisplayImage() {
     // Check if the server provided time information and update RTC if available
     if (respDoc.containsKey("time")) {
         JsonObject timeObj = respDoc["time"].as<JsonObject>();
+        
+        // Debug log the time object
+        String timeDebug = "Time object received: ";
+        serializeJson(timeObj, timeDebug);
+        Serial.println(timeDebug);
+        logEvent(timeDebug.c_str());
+        
         if (syncRTCFromServerData(timeObj)) {
             logEvent("RTC synchronized with server time");
         } else {
             logEvent("Server provided invalid time information");
         }
+    } else {
+        Serial.println("WARNING: No time object in server response");
+        logEvent("WARNING: No time object in server response");
     }
     
     String imageUrl = respDoc["image_url"].as<String>();

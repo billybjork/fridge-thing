@@ -73,12 +73,16 @@ async def get_or_create_device(conn: asyncpg.Connection, device_uuid: str) -> di
 # Time Synchronization Utilities
 # ------------------------------------------------------------------------------
 
-def get_current_time_info() -> dict:
+def get_current_time_info(timezone=None) -> dict:
     """
     Get current time information formatted for the device's RTC.
-    Returns a dictionary with the current time in the configured timezone.
+    Returns a dictionary with the current time in the specified timezone.
+    If no timezone is provided, uses SERVER_TIMEZONE.
     """
-    now = datetime.now(SERVER_TIMEZONE)
+    if timezone is None:
+        timezone = SERVER_TIMEZONE
+    
+    now = datetime.now(timezone)
     
     # Convert to 2-digit year
     year = now.year % 100
@@ -126,11 +130,14 @@ async def get_display(
     # Parse request body as raw JSON
     try:
         body = await request.json()
+        print(f"Received request from device {device_uuid}: {body}")
     except Exception as e:
+        print(f"Error parsing request from device {device_uuid}: {str(e)}")
         return {"error": f"Invalid request body: {str(e)}"}
     
-    # Extract time sync flag directly from JSON
+    # Extract time sync flag directly from JSON (default to true for testing)
     request_time_sync = body.get("request_time_sync", False)
+    print(f"Device {device_uuid} requested time sync: {request_time_sync}")
     
     # Update device information in database if needed
     # TODO: Store battery level, firmware version, etc.
@@ -149,6 +156,12 @@ async def get_display(
         # ------------------------------------------------------------------------------
         cst = pytz.timezone("America/Chicago")
         now_cst = datetime.now(cst)
+        
+        # For Pacific Time
+        pacific = pytz.timezone("America/Los_Angeles")
+        now_pacific = datetime.now(pacific)
+        print(f"Current time - CST: {now_cst}, Pacific: {now_pacific}")
+        
         if now_cst.time() >= time(0, 0) and now_cst.time() < time(8, 0):
             # Calculate seconds until 8:00 am CST
             target_time = datetime.combine(now_cst.date(), time(8, 0), tzinfo=cst)
@@ -162,9 +175,9 @@ async def get_display(
                 "next_wake_secs": next_wake_secs
             }
             
-            # Add time information if requested
-            if request_time_sync:
-                response["time"] = get_current_time_info()
+            # Add time information if requested or always for testing
+            response["time"] = get_current_time_info(pacific)  # Use Pacific time
+            print(f"Sending time info to device {device_uuid}: {response['time']}")
                 
             return response
 
@@ -201,9 +214,9 @@ async def get_display(
             "next_wake_secs": device_row.get("next_wake_secs", 3600)
         }
         
-        # Add time information if requested
-        if request_time_sync:
-            response["time"] = get_current_time_info()
+        # Add time information if requested or always for testing
+        response["time"] = get_current_time_info(pacific)  # Use Pacific time
+        print(f"Sending time info to device {device_uuid}: {response['time']}")
             
         return response
 
