@@ -25,7 +25,7 @@ Inkplate display;
 Preferences preferences;
 
 // OTA configuration
-const char* currentFirmwareVersion = "1.4";  // Current firmware version
+const char* currentFirmwareVersion = "1.9";  // Current firmware version
 const char* versionCheckURL = "https://s3.us-west-1.amazonaws.com/bjork.love/fridge-thing-firmware/version.txt";
 const char* firmwareURL = "https://s3.us-west-1.amazonaws.com/bjork.love/fridge-thing-firmware/firmware.ino.bin";
 
@@ -135,9 +135,6 @@ void logEvent(const char* message) {
 
 /**
  * Update the display with device status information.
- * 
- * --- MODIFIED ---
- * Only refresh (i.e. call display.display()) when in error state or when displaying a new image.
  */
 void updateStateDisplay(bool fullRefresh = true) {
     // Only update the physical display if we are in an error state or when showing a new image.
@@ -282,8 +279,8 @@ bool checkAndReconnectWifi() {
 /**
  * Read WiFi credentials from the SD card.
  * Format of the file should be:
- * NETWORK=YourNetworkName
- * PASSWORD=YourPassword
+    * NETWORK=YourNetworkName
+    * PASSWORD=YourPassword
  * 
  * Returns true if credentials were successfully read.
  */
@@ -342,7 +339,7 @@ bool readWiFiCredentialsFromSD(String &ssid, String &password) {
     // Don't log the actual credentials for security reasons
     logEvent("Successfully read WiFi credentials from SD card");
     
-    // Optionally save to preferences as a backup
+    // Save to preferences as a backup
     preferences.begin("wifi", false);
     preferences.putString("ssid", ssid);
     preferences.putString("password", password);
@@ -642,7 +639,6 @@ void fetchAndDisplayImage() {
         return;
     }
     
-    // Rest of the function remains unchanged
     setState(STATE_DISPLAYING_IMAGE);
     Serial.println("Rendering image...");
     logEvent("Rendering image...");
@@ -696,6 +692,13 @@ void checkOTAUpdate() {
         return;
     }
     
+    // Log memory before starting the update process
+    int freeHeapBefore = ESP.getFreeHeap();
+    String memoryMsg = "Free memory before update check: " + String(freeHeapBefore) + " bytes";
+    Serial.println(memoryMsg);
+    logEvent(memoryMsg.c_str());
+    
+    // Use a dedicated client for version check
     WiFiClientSecure client;
     client.setInsecure();
     
@@ -708,25 +711,101 @@ void checkOTAUpdate() {
             newVersion.trim();
             Serial.println("Latest firmware: " + newVersion);
             logEvent(("Latest firmware: " + newVersion).c_str());
+            http.end(); // Close the connection after getting version
+            
             if (newVersion != String(currentFirmwareVersion)) {
                 Serial.println("New firmware available. Starting OTA update...");
                 logEvent("New firmware available. Starting OTA update...");
+                
+                // Free up memory before update by releasing the client
+                client = WiFiClientSecure(); // Reset client
+                
+                // Give system time to finish other tasks
+                delay(1000);
+                
+                // Restart WiFi connection to ensure it's in a clean state
+                WiFi.disconnect(true);
+                delay(500);
+                WiFi.begin();
+                delay(1000);
+                
+                // Log memory state before update
+                int updateHeap = ESP.getFreeHeap();
+                String updateMemMsg = "Free memory before update: " + String(updateHeap) + " bytes";
+                Serial.println(updateMemMsg);
+                logEvent(updateMemMsg.c_str());
+                
                 setState(STATE_UPDATING_FW);
-                t_httpUpdate_return ret = httpUpdate.update(client, firmwareURL);
+                
+                // Prepare for the update with relaxed security settings
+                httpUpdate.rebootOnUpdate(false); // Disable auto-reboot
+                httpUpdate.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
+                
+                // Create update clients
+                WiFiClientSecure secureClient;
+                secureClient.setInsecure();
+                WiFiClient httpClient; // Non-secure client for HTTP fallback
+                
+                // Try HTTP first (this often works better for binary downloads)
+                String httpUrl = firmwareURL;
+                httpUrl.replace("https://", "http://");
+                
+                Serial.println("Attempting HTTP update...");
+                logEvent("Attempting HTTP update...");
+                Serial.println("From URL: " + httpUrl);
+                logEvent(("From URL: " + httpUrl).c_str());
+                
+                t_httpUpdate_return ret = httpUpdate.update(httpClient, httpUrl);
+                
+                // If HTTP fails, try HTTPS
+                if (ret == HTTP_UPDATE_FAILED) {
+                    String errorMsg = "HTTP update failed (" + String(httpUpdate.getLastError()) + "): " + httpUpdate.getLastErrorString();
+                    Serial.println(errorMsg);
+                    logEvent(errorMsg.c_str());
+                    
+                    // Try HTTPS as a fallback
+                    Serial.println("Trying HTTPS update as fallback...");
+                    logEvent("Trying HTTPS update as fallback...");
+                    Serial.println("From URL: " + String(firmwareURL));
+                    logEvent(("From URL: " + String(firmwareURL)).c_str());
+                    
+                    ret = httpUpdate.update(secureClient, firmwareURL);
+                }
+                
+                // Handle update result
                 switch(ret) {
-                    case HTTP_UPDATE_FAILED:
-                        Serial.printf("OTA failed (%d): %s\n", httpUpdate.getLastError(), httpUpdate.getLastErrorString().c_str());
-                        logEvent(("OTA failed (" + String(httpUpdate.getLastError()) + "): " + httpUpdate.getLastErrorString()).c_str());
+                    case HTTP_UPDATE_FAILED: {
+                        String errorMsg = "OTA failed (" + String(httpUpdate.getLastError()) + "): " + httpUpdate.getLastErrorString();
+                        Serial.println(errorMsg);
+                        logEvent(errorMsg.c_str());
+                        
+                        // Log current memory state
+                        Serial.println("Free memory after failed update: " + String(ESP.getFreeHeap()) + " bytes");
+                        logEvent(("Free memory after failed update: " + String(ESP.getFreeHeap()) + " bytes").c_str());
+                        
+                        // Additional troubleshooting info
+                        if (httpUpdate.getLastError() == -106) {
+                            Serial.println("Bin header verification failed. Make sure your firmware binary is properly compiled for OTA updates.");
+                            logEvent("Bin header verification failed. Make sure your firmware binary is properly compiled for OTA updates.");
+                        }
+                        
                         setState(STATE_ERROR, ERROR_OTA_UPDATE);
                         delay(5000);
                         break;
-                    case HTTP_UPDATE_NO_UPDATES:
+                    }
+                    case HTTP_UPDATE_NO_UPDATES: {
                         Serial.println("No OTA updates available.");
                         logEvent("No OTA updates available.");
                         break;
-                    case HTTP_UPDATE_OK:
-                        // Device will reboot automatically.
+                    }
+                    case HTTP_UPDATE_OK: {
+                        // Update successful, manually restart
+                        Serial.println("OTA update successful! Restarting...");
+                        logEvent("OTA update successful! Restarting...");
+                        delay(1000);
+                        ESP.restart();
                         break;
+                    }
                 }
             } else {
                 Serial.println("Firmware up-to-date.");
@@ -735,8 +814,8 @@ void checkOTAUpdate() {
         } else {
             Serial.printf("OTA check HTTP code: %d\n", httpCode);
             logEvent(("OTA check HTTP code: " + String(httpCode)).c_str());
+            http.end();
         }
-        http.end();
     } else {
         Serial.println("Failed to initiate OTA HTTP connection.");
         logEvent("Failed to initiate OTA HTTP connection.");
@@ -745,14 +824,13 @@ void checkOTAUpdate() {
 
 /**
  * Setup: initialize display, RTC, SD card, Wi-Fi, state, and proceed with normal operation.
- * Also, increment the boot count and log the wake-up cause.
+ * Increment the boot count and log the wake-up cause.
  */
 void setup() {
     // Start with basic serial test
     Serial.begin(115200);
     delay(2000);  // Longer delay for stability
     
-    // Continue with your normal setup
     // Disable Bluetooth to save power
     Serial.println("Disabling Bluetooth...");
     btStop();
