@@ -1,7 +1,7 @@
 import os
 import random
 from contextlib import asynccontextmanager
-from typing import Optional
+from typing import Optional, Dict, Any
 
 import asyncpg
 from dotenv import load_dotenv
@@ -37,6 +37,9 @@ DEFAULT_FALLBACK_IMAGE = "https://s3.us-west-1.amazonaws.com/bjork.love/21977917
 # Default target resolution (for legacy devices)
 TARGET_RESOLUTION = (600, 448)
 
+# Timezone for time synchronization
+SERVER_TIMEZONE = pytz.timezone("America/Chicago")
+
 # ------------------------------------------------------------------------------
 # Database Operations
 # ------------------------------------------------------------------------------
@@ -69,9 +72,55 @@ async def get_or_create_device(conn: asyncpg.Connection, device_uuid: str) -> di
 # Pydantic Schemas
 # ------------------------------------------------------------------------------
 
+class TimeInfo(BaseModel):
+    """Time information for device RTC synchronization"""
+    year: int      # 2-digit year (e.g., 25 for 2025)
+    month: int     # 1-12
+    day: int       # 1-31
+    weekday: int   # 1-7 (Monday=1, Sunday=7)
+    hour: int      # 0-23
+    minute: int    # 0-59
+    second: int    # 0-59
+
+class DeviceDisplayRequest(BaseModel):
+    """Request from device to fetch display image"""
+    current_fw_ver: str
+    battery_pct: float
+    battery_voltage: float
+    request_time_sync: bool = False
+
 class DeviceDisplayResponse(BaseModel):
+    """Response to device with image URL and optional time information"""
     image_url: str
     next_wake_secs: int
+    time: Optional[TimeInfo] = None
+
+# ------------------------------------------------------------------------------
+# Time Synchronization Utilities
+# ------------------------------------------------------------------------------
+
+def get_current_time_info() -> TimeInfo:
+    """
+    Get current time information formatted for the device's RTC.
+    Returns a TimeInfo object with the current time in the configured timezone.
+    """
+    now = datetime.now(SERVER_TIMEZONE)
+    
+    # Convert to 2-digit year
+    year = now.year % 100
+    
+    # Get weekday as 1-7 (Monday=1, Sunday=7)
+    weekday = now.isoweekday()  # isoweekday returns 1-7 where 1=Monday
+    
+    return TimeInfo(
+        year=year,
+        month=now.month,
+        day=now.day,
+        weekday=weekday,
+        hour=now.hour,
+        minute=now.minute,
+        second=now.second
+    )
 
 # ------------------------------------------------------------------------------
 # Fallback image handler
@@ -98,7 +147,15 @@ async def get_display(
     Endpoint for device display requests.
     Retrieves device information (including display resolution) and returns an image URL
     pointing to a conversion endpoint that dynamically adapts the image.
+    Also provides time information when requested for RTC synchronization.
     """
+    # Parse request body
+    body = await request.json()
+    device_request = DeviceDisplayRequest(**body)
+    
+    # Update device information in database if needed
+    # TODO: Store battery level, firmware version, etc.
+    
     pool = request.app.state.pool
     async with pool.acquire() as conn:
         device_row = await get_or_create_device(conn, device_uuid)
@@ -119,7 +176,18 @@ async def get_display(
             if now_cst >= target_time:
                 target_time += timedelta(days=1)
             next_wake_secs = int((target_time - now_cst).total_seconds())
-            return DeviceDisplayResponse(image_url="NO_REFRESH", next_wake_secs=next_wake_secs)
+            
+            # Create response with or without time info
+            response = DeviceDisplayResponse(
+                image_url="NO_REFRESH", 
+                next_wake_secs=next_wake_secs
+            )
+            
+            # Add time information if requested
+            if device_request.request_time_sync:
+                response.time = get_current_time_info()
+                
+            return response
 
         # Retrieve channel information
         channel_id = device_row.get("channel_id")
@@ -148,7 +216,17 @@ async def get_display(
             params["url"] = fallback_url
             image_url = str(request.url_for("convert_image")) + "?" + urlencode(params)
 
-        return DeviceDisplayResponse(image_url=image_url, next_wake_secs=device_row.get("next_wake_secs", 3600))
+        # Create response with or without time info
+        response = DeviceDisplayResponse(
+            image_url=image_url, 
+            next_wake_secs=device_row.get("next_wake_secs", 3600)
+        )
+        
+        # Add time information if requested
+        if device_request.request_time_sync:
+            response.time = get_current_time_info()
+            
+        return response
 
 @router.get("/api/convert", name="convert_image")
 async def convert_image(url: str, width: int = None, height: int = None):

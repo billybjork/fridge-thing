@@ -11,8 +11,9 @@
 #include <HTTPUpdate.h>
 #include <esp_wifi.h>
 
-// Forward declaration to prevent implicit prototype issues
+// Forward declarations
 bool readWiFiCredentialsFromSD(String &ssid, String &password);
+void initializeRTC();
 
 // RTC_DATA_ATTR makes this variable persist across deep sleep cycles
 RTC_DATA_ATTR int bootCount = 0;
@@ -351,6 +352,90 @@ bool readWiFiCredentialsFromSD(String &ssid, String &password) {
 }
 
 /**
+ * Sync the RTC time using information received from the server
+ * Returns true if successfully updated
+ */
+bool syncRTCFromServerData(JsonObject timeObj) {
+    if (!timeObj.containsKey("year") || !timeObj.containsKey("month") || 
+        !timeObj.containsKey("day") || !timeObj.containsKey("weekday") || 
+        !timeObj.containsKey("hour") || !timeObj.containsKey("minute") || 
+        !timeObj.containsKey("second")) {
+        return false;
+    }
+            
+    uint8_t year = timeObj["year"].as<uint8_t>();
+    uint8_t month = timeObj["month"].as<uint8_t>();
+    uint8_t day = timeObj["day"].as<uint8_t>();
+    uint8_t weekday = timeObj["weekday"].as<uint8_t>();
+    uint8_t hour = timeObj["hour"].as<uint8_t>();
+    uint8_t minute = timeObj["minute"].as<uint8_t>();
+    uint8_t second = timeObj["second"].as<uint8_t>();
+    
+    // Validate time values
+    if (year < 23 || year > 99 || month < 1 || month > 12 || 
+        day < 1 || day > 31 || weekday < 1 || weekday > 7 ||
+        hour > 23 || minute > 59 || second > 59) {
+        return false;
+    }
+    
+    // Set the RTC with the server time
+    display.rtcSetTime(hour, minute, second);
+    display.rtcSetDate(weekday, day, month, year);
+    
+    // Optional: RTC calibration
+    display.rtcSetInternalCapacitor(RTC_12_5PF);
+    display.rtcSetClockOffset(1, -63);
+    
+    // Log the time update
+    char timeMsg[100];
+    snprintf(timeMsg, sizeof(timeMsg), "RTC updated: 20%02d-%02d-%02d %02d:%02d:%02d (weekday: %d)",
+             year, month, day, hour, minute, second, weekday);
+    Serial.println(timeMsg);
+    logEvent(timeMsg);
+    
+    return true;
+}
+
+/**
+ * Initialize the RTC with correct time and check if it's working properly
+ */
+void initializeRTC() {
+    display.rtcGetRtcData();
+    uint8_t rtcYear = display.rtcGetYear();
+    uint8_t rtcMonth = display.rtcGetMonth();
+    uint8_t rtcDay = display.rtcGetDay();
+    
+    Serial.print("RTC initial read: Year=");
+    Serial.print(rtcYear);
+    Serial.print(", Month=");
+    Serial.print(rtcMonth);
+    Serial.print(", Day=");
+    Serial.println(rtcDay);
+    
+    // If the date is invalid or unreasonable, flag for update
+    // We consider any date before 2023 as invalid
+    bool needsRTCUpdate = rtcYear < 23 || rtcYear > 99 || rtcMonth < 1 || rtcMonth > 12 || rtcDay < 1 || rtcDay > 31;
+    
+    if (needsRTCUpdate) {
+        // RTC will be updated later when we connect to the server
+        // For now, set a default time as a fallback in case WiFi fails
+        Serial.println("RTC has invalid date/time. Will attempt to sync from server.");
+        logEvent("RTC has invalid date/time. Will attempt to sync from server.");
+        
+        // Following the Inkplate reference example order of parameters:
+        // Hours, Minutes, Seconds
+        display.rtcSetTime(12, 0, 0);
+        
+        // According to documentation: Weekday (1=Monday), Day, Month, Year
+        // Set to a default date
+        display.rtcSetDate(1, 1, 1, 25);  // Monday, Jan 1, 2025
+    } else {
+        Serial.println("RTC date/time looks valid!");
+        logEvent("RTC date/time looks valid");
+    }
+}
+
+/**
  * Download a BMP image from 'imageUrl' and store it on the SD card at 'localPath'.
  * Returns true if successful.
  */
@@ -423,6 +508,7 @@ bool downloadToSD(const String &imageUrl, const String &localPath, WiFiClient &c
 /**
  * Fetch a BMP image from the server, save it to SD, render it, and then schedule deep sleep.
  * Battery information is included in the server request.
+ * Time information is received from the server and used to update the RTC.
  */
 void fetchAndDisplayImage() {
     setState(STATE_FETCHING_IMAGE);
@@ -462,6 +548,16 @@ void fetchAndDisplayImage() {
     doc["battery_pct"] = batteryPercent;
     doc["battery_voltage"] = voltage;
     
+    // Add flag to request time sync from server
+    display.rtcGetRtcData();
+    uint8_t rtcYear = display.rtcGetYear();
+    uint8_t rtcMonth = display.rtcGetMonth();
+    uint8_t rtcDay = display.rtcGetDay();
+    bool needsTimeSync = rtcYear < 23 || rtcYear > 99 || rtcMonth < 1 || rtcMonth > 12 || rtcDay < 1 || rtcDay > 31;
+    
+    // Request time sync if needed or periodically
+    doc["request_time_sync"] = needsTimeSync || (bootCount % 24 == 0);
+    
     String body;
     serializeJson(doc, body);
     int httpCode = http.POST(body);
@@ -489,7 +585,7 @@ void fetchAndDisplayImage() {
     Serial.println("Server response: " + resp);
     logEvent(("Server response: " + resp).c_str());
     
-    StaticJsonDocument<512> respDoc;
+    StaticJsonDocument<768> respDoc;  // Increased size to accommodate time info
     DeserializationError err = deserializeJson(respDoc, resp);
     http.end();
     if (err) {
@@ -499,6 +595,16 @@ void fetchAndDisplayImage() {
         delay(5000);
         ESP.restart();
         return;
+    }
+    
+    // Check if the server provided time information and update RTC if available
+    if (respDoc.containsKey("time")) {
+        JsonObject timeObj = respDoc["time"].as<JsonObject>();
+        if (syncRTCFromServerData(timeObj)) {
+            logEvent("RTC synchronized with server time");
+        } else {
+            logEvent("Server provided invalid time information");
+        }
     }
     
     String imageUrl = respDoc["image_url"].as<String>();
@@ -527,7 +633,7 @@ void fetchAndDisplayImage() {
         return;
     }
     
-    // Render the downloaded image.
+    // Rest of the function remains unchanged
     setState(STATE_DISPLAYING_IMAGE);
     Serial.println("Rendering image...");
     logEvent("Rendering image...");
@@ -647,22 +753,13 @@ void setup() {
     Serial.println("Initializing display...");
     display.begin();
     Serial.println("Display initialized");
-    display.rtcGetRtcData();
-    
-    // If the RTC does not appear to be set (year < 20), set a default time.
-    if (display.rtcGetYear() < 20) {
-        Serial.println("RTC not set; initializing with default time and date...");
-        display.rtcSetTime(14, 10, 0); // Hours, Minutes, Seconds
-        display.rtcSetDate(6, 3, 8, 25); // Weekday (1 = Monday), Month, Day, Year
-        
-        // Optional: RTC calibration
-        display.rtcSetInternalCapacitor(RTC_12_5PF);
-        display.rtcSetClockOffset(1, -63); // Adjust offset as needed
-    }
-    
+
+    // Initialize and verify RTC
+    initializeRTC();
+
     // Increment boot count (persistent across deep sleep)
     bootCount++;
-    
+
     // Initialize SD card before logging.
     sdCardAvailable = display.sdCardInit();
     if (!sdCardAvailable) {
