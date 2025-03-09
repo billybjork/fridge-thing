@@ -25,9 +25,9 @@ Inkplate display;
 Preferences preferences;
 
 // OTA configuration
-const char* currentFirmwareVersion = "1.9";  // Current firmware version
-const char* versionCheckURL = "https://s3.us-west-1.amazonaws.com/bjork.love/fridge-thing-firmware/version.txt";
-const char* firmwareURL = "https://s3.us-west-1.amazonaws.com/bjork.love/fridge-thing-firmware/firmware.ino.bin";
+const char* currentFirmwareVersion = "1.5";  // Current firmware version
+const char* versionCheckURL = "https://s3.us-west-1.amazonaws.com/fridge-thing/firmware/version.txt";
+const char* firmwareURL = "https://s3.us-west-1.amazonaws.com/fridge-thing/firmware/firmware.ino.bin";
 
 // State tracking and error handling constants
 #define STATE_INITIALIZING     0
@@ -137,9 +137,10 @@ void logEvent(const char* message) {
  * Update the display with device status information.
  */
 void updateStateDisplay(bool fullRefresh = true) {
-    // Only update the physical display if we are in an error state or when showing a new image.
-    if (currentState != STATE_ERROR && currentState != STATE_DISPLAYING_IMAGE) {
-        // Do not refresh the display in transient states.
+    // Only update the physical display if we are in an error state
+    // We no longer refresh for STATE_DISPLAYING_IMAGE here to avoid double refresh
+    if (currentState != STATE_ERROR) {
+        // Do not refresh the display in transient states or displaying image state
         return;
     }
     
@@ -177,12 +178,9 @@ void updateStateDisplay(bool fullRefresh = true) {
                 display.print("Unknown Error");
                 break;
         }
-    } else if (currentState == STATE_DISPLAYING_IMAGE) {
-        // When displaying an image, we assume the image is already drawn,
-        // so no additional text is needed.
     }
     
-    display.display(); // This triggers the e-paper refresh (only done for allowed states)
+    display.display(); // This triggers the e-paper refresh (only done for error states now)
 }
 
 /**
