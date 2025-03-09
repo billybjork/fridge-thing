@@ -84,24 +84,10 @@ String formatNumber(int num) {
 
 /**
  * Log an event to "log.txt" on the SD card with a timestamp from the RTC.
+ * Prints a single copy to Serial and stores to SD card if available.
  */
 void logEvent(const char* message) {
-    // Always log to Serial first.
-    Serial.println(message);
-
-    // Then, if SD card logging is desired, try logging to SD.
-    if (!sdCardAvailable) {
-        Serial.println("SD card not available for logging.");
-        return;
-    }
-    
-    SdFile logFile;
-    if (!logFile.open("/log.txt", O_WRITE | O_CREAT | O_APPEND)) {
-        Serial.println("ERROR: Could not open log file.");
-        return;
-    }
-    
-    // Get current date and time from RTC.
+    // Get current date and time from RTC
     display.rtcGetRtcData();
     uint8_t second = display.rtcGetSecond();
     uint8_t minute = display.rtcGetMinute();
@@ -110,17 +96,40 @@ void logEvent(const char* message) {
     uint8_t month  = display.rtcGetMonth();
     uint8_t year   = display.rtcGetYear();
     
-    // Use a larger buffer and snprintf for safety.
+    // Format timestamp - the RTC typically stores 2-digit years (23 for 2023)
+    // But make sure we get reasonable values
     char timestamp[32];
+    
+    // Ensure year is reasonable (between 20-99)
+    if (year < 20 || year > 99) year = 25; // Default to 2025 if out of range
+    
+    // Ensure month is reasonable (1-12)
+    if (month < 1 || month > 12) month = 1;
+    
+    // Ensure day is reasonable (1-31)
+    if (day < 1 || day > 31) day = 1;
+    
     snprintf(timestamp, sizeof(timestamp), "20%02d-%02d-%02d %02d:%02d:%02d", 
              year, month, day, hour, minute, second);
     
-    String logLine = String(timestamp) + ": " + message + "\n";
-    logFile.write((const uint8_t*)logLine.c_str(), logLine.length());
-    logFile.close();
+    // Create formatted log line
+    String logLine = String(timestamp) + ": " + message;
     
-    // Also print the timestamped log line to Serial.
+    // Print to Serial once with timestamp
     Serial.println(logLine);
+    
+    // Write to SD card if available
+    if (sdCardAvailable) {
+        SdFile logFile;
+        if (logFile.open("/log.txt", O_WRITE | O_CREAT | O_APPEND)) {
+            // Add newline for file
+            logLine += "\n";
+            logFile.write((const uint8_t*)logLine.c_str(), logLine.length());
+            logFile.close();
+        } else {
+            Serial.println("ERROR: Could not open log file.");
+        }
+    }
 }
 
 /**
@@ -624,13 +633,20 @@ void checkOTAUpdate() {
  * Also, increment the boot count and log the wake-up cause.
  */
 void setup() {
+    // Start with basic serial test
     Serial.begin(115200);
-    // Disable Bluetooth to save power, as it's not used.
-    btStop();
-    Serial.println("\n\nFridge Thing starting up...");
+    delay(2000);  // Longer delay for stability
     
-    // Initialize display and RTC
+    // Continue with your normal setup
+    // Disable Bluetooth to save power
+    Serial.println("Disabling Bluetooth...");
+    btStop();
+    Serial.println("Fridge Thing starting up...");
+    
+    // Initialize display and RTC with debug prints between steps
+    Serial.println("Initializing display...");
     display.begin();
+    Serial.println("Display initialized");
     display.rtcGetRtcData();
     
     // If the RTC does not appear to be set (year < 20), set a default time.
