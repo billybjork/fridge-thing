@@ -86,45 +86,56 @@ String formatNumber(int num) {
  * Log an event to "log.txt" on the SD card with a timestamp from the RTC.
  */
 void logEvent(const char* message) {
+    // Always log to Serial first.
+    Serial.println(message);
+
+    // Then, if SD card logging is desired, try logging to SD.
     if (!sdCardAvailable) {
         Serial.println("SD card not available for logging.");
         return;
     }
     
     SdFile logFile;
-    // Open the log file in append mode.
     if (!logFile.open("/log.txt", O_WRITE | O_CREAT | O_APPEND)) {
         Serial.println("ERROR: Could not open log file.");
         return;
     }
     
-    // Get current date and time from RTC
+    // Get current date and time from RTC.
     display.rtcGetRtcData();
-    
     uint8_t second = display.rtcGetSecond();
     uint8_t minute = display.rtcGetMinute();
-    uint8_t hour = display.rtcGetHour();
-    uint8_t day = display.rtcGetDay();
-    uint8_t month = display.rtcGetMonth();
-    uint8_t year = display.rtcGetYear();
+    uint8_t hour   = display.rtcGetHour();
+    uint8_t day    = display.rtcGetDay();
+    uint8_t month  = display.rtcGetMonth();
+    uint8_t year   = display.rtcGetYear();
     
-    // Format: YYYY-MM-DD HH:MM:SS: message
-    char timestamp[20];
-    sprintf(timestamp, "20%02d-%02d-%02d %02d:%02d:%02d", 
-            year, month, day, hour, minute, second);
+    // Use a larger buffer and snprintf for safety.
+    char timestamp[32];
+    snprintf(timestamp, sizeof(timestamp), "20%02d-%02d-%02d %02d:%02d:%02d", 
+             year, month, day, hour, minute, second);
     
     String logLine = String(timestamp) + ": " + message + "\n";
     logFile.write((const uint8_t*)logLine.c_str(), logLine.length());
     logFile.close();
     
-    // Also print to Serial for debugging.
+    // Also print the timestamped log line to Serial.
     Serial.println(logLine);
 }
 
 /**
  * Update the display with device status information.
+ * 
+ * --- MODIFIED ---
+ * Only refresh (i.e. call display.display()) when in error state or when displaying a new image.
  */
 void updateStateDisplay(bool fullRefresh = true) {
+    // Only update the physical display if we are in an error state or when showing a new image.
+    if (currentState != STATE_ERROR && currentState != STATE_DISPLAYING_IMAGE) {
+        // Do not refresh the display in transient states.
+        return;
+    }
+    
     if (fullRefresh) {
         display.clearDisplay();
     }
@@ -159,19 +170,20 @@ void updateStateDisplay(bool fullRefresh = true) {
                 display.print("Unknown Error");
                 break;
         }
-    } else if (currentState == STATE_INITIALIZING) {
-        display.print("Initializing...");
-    } else if (currentState == STATE_CONNECTING_WIFI) {
-        display.print("Connecting to WiFi...");
-        display.setCursor(10, 50);
-        display.print("Using wifi.txt settings");
+    } else if (currentState == STATE_DISPLAYING_IMAGE) {
+        // When displaying an image, we assume the image is already drawn,
+        // so no additional text is needed.
     }
     
-    display.display();
+    display.display(); // This triggers the e-paper refresh (only done for allowed states)
 }
 
 /**
  * Set the current state and error code, store them persistently, and log the event.
+ * 
+ * --- NOTE ---
+ * updateStateDisplay() is called here but will only trigger a physical refresh when in
+ * error state or when displaying an image.
  */
 void setState(int newState, int newErrorCode = ERROR_NONE) {
     preferences.begin("state", false);
@@ -190,7 +202,7 @@ void setState(int newState, int newErrorCode = ERROR_NONE) {
     Serial.println(stateMsg);
     logEvent(stateMsg.c_str());
     
-    updateStateDisplay();
+    updateStateDisplay();  // Will only refresh display if appropriate.
 }
 
 /**
