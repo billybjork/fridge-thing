@@ -1,0 +1,17 @@
+certifi==2025.1.31
+charset-normalizer==3.4.1
+gpiod==2.3.0
+gpiodevice==0.0.5
+idna==3.10
+inky==2.0.0
+Jinja2==3.1.5
+MarkupSafe==3.0.2
+numpy==2.2.3
+pdoc==15.0.1
+pillow==11.1.0
+Pygments==2.19.1
+requests==2.32.3
+smbus2==0.5.0
+spidev==3.6
+toml==0.10.2
+urllib3==2.3.0

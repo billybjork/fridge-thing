@@ -1,0 +1,12 @@
+[Unit]
+Description=Inky Display Update Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=pi
+WorkingDirectory=/home/pi
+ExecStart=/home/pi/venv/bin/python3 /home/pi/inky_impression.py
+StandardOutput=journal
+StandardError=journal

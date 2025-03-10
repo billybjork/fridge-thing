@@ -5,7 +5,6 @@ import time
 import logging
 import requests
 import subprocess
-# import hashlib - removed image comparison functionality
 import json
 from datetime import datetime
 from pathlib import Path
@@ -165,7 +164,7 @@ def get_device_uuid():
     try:
         with open("/sys/class/net/wlan0/address", "r") as f:
             mac = f.read().strip()
-        # Remove colons and convert to uppercase (like ESP32 implementation)
+        # Remove colons and convert to uppercase
         uuid = mac.replace(":", "").upper()
         log_event(f"Device UUID: {uuid}")
         return uuid
@@ -301,25 +300,6 @@ def try_connect_wifi():
 # -------------------------------------------------------------------------------
 # Power Management Functions
 # -------------------------------------------------------------------------------
-
-def enable_power_savings():
-    """Enable various power-saving features on the Pi"""
-    log_event("Enabling power saving features")
-    
-    try:
-        # Disable Bluetooth if not needed
-        subprocess.run(["sudo", "rfkill", "block", "bluetooth"], check=False)
-        
-        # Try to adjust CPU governor for power savings
-        try:
-            subprocess.run(["sudo", "cpufreq-set", "-g", "powersave"], check=False)
-        except:
-            pass  # Ignore if cpufreq-set is not available
-        
-        log_event("Power saving features enabled")
-        
-    except Exception as e:
-        log_event(f"Error enabling power savings: {e}")
 
 def prepare_for_sleep(sleep_seconds):
     """
@@ -542,11 +522,6 @@ def download_image(url, local_path):
         log_event(f"Exception during image download: {e}")
         return False
 
-
-# Remove optimize_image_processing function as it's no longer used
-
-# Removed images_are_identical function
-
 # -------------------------------------------------------------------------------
 # Main Logic
 # -------------------------------------------------------------------------------
@@ -562,6 +537,13 @@ def main():
     log_event(f"Device UUID: {DEVICE_UUID}")
     log_event(f"Current version: {CURRENT_VERSION}")
     
+    # Disable Bluetooth to save power
+    try:
+        subprocess.run(["sudo", "rfkill", "block", "bluetooth"], check=False)
+        log_event("Bluetooth disabled")
+    except Exception as e:
+        log_event(f"Note: Could not disable Bluetooth: {e}")
+    
     # Initialize display
     try:
         inky = auto()
@@ -570,9 +552,6 @@ def main():
     except Exception as e:
         log_event(f"ERROR: Display initialization failed: {e}")
         sys.exit(1)
-    
-    # Enable power saving features
-    enable_power_savings()
     
     # Skip initializing display message
     set_state(STATE_INITIALIZING)
