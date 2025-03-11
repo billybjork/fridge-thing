@@ -17,7 +17,7 @@ from datetime import datetime, time, timedelta
 import pytz
 import json
 
-from image_utils import fill_letterbox
+from utils.image_utils import fill_letterbox
 
 # ------------------------------------------------------------------------------
 # Configuration
