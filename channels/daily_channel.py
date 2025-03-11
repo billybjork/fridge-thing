@@ -10,7 +10,7 @@ import numpy as np
 from fastapi import APIRouter, Request, Response
 from PIL import Image, ImageOps, ImageDraw, ImageFont
 
-from ..utils.image_utils import fill_letterbox
+from utils.image_utils import fill_letterbox
 
 router = APIRouter()
 
