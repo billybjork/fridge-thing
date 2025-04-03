@@ -27,7 +27,7 @@ Preferences preferences;
 // OTA configuration
 const char* currentFirmwareVersion = "1.6";  // Current firmware version
 const char* versionCheckURL = "https://s3.us-west-1.amazonaws.com/fridge-thing/firmware/version.txt";
-const char* firmwareURL = "https://s3.us-west-1.amazonaws.com/fridge-thing/firmware/firmware.ino.bin";
+const char* firmwareURL = "https://s3.us-west-1.amazonaws.com/fridge-thing/firmware/inkplate-6color.ino.bin";
 
 // State tracking and error handling constants
 #define STATE_INITIALIZING     0
