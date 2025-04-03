@@ -25,7 +25,7 @@ Inkplate display;
 Preferences preferences;
 
 // OTA configuration
-const char* currentFirmwareVersion = "1.5";  // Current firmware version
+const char* currentFirmwareVersion = "1.6";  // Current firmware version
 const char* versionCheckURL = "https://s3.us-west-1.amazonaws.com/fridge-thing/firmware/version.txt";
 const char* firmwareURL = "https://s3.us-west-1.amazonaws.com/fridge-thing/firmware/firmware.ino.bin";
 
@@ -566,11 +566,17 @@ void fetchAndDisplayImage() {
         esp_sleep_enable_timer_wakeup(60 * 1000000ULL);
         esp_sleep_enable_ext0_wakeup(GPIO_NUM_36, 0);
         setState(STATE_SLEEPING);
+
         // Disable WiFi to save battery before deep sleep.
         WiFi.disconnect();
         WiFi.mode(WIFI_OFF);
         esp_wifi_stop();
         delay(1000);
+
+        logEvent("Putting SD card to sleep due to error.");
+        display.sdCardSleep();
+        delay(100); // Short delay to ensure command takes effect
+
         esp_deep_sleep_start();
         return;
     }
@@ -633,6 +639,11 @@ void fetchAndDisplayImage() {
         WiFi.mode(WIFI_OFF);
         esp_wifi_stop();
         delay(1000);
+
+        logEvent("Putting SD card to sleep due to error.");
+        display.sdCardSleep();
+        delay(100); // Short delay
+
         esp_deep_sleep_start();
         return;
     }
@@ -673,6 +684,11 @@ void fetchAndDisplayImage() {
     WiFi.mode(WIFI_OFF);
     esp_wifi_stop();
     delay(1000);
+
+    logEvent("Putting SD card to sleep.");
+    display.sdCardSleep();
+    delay(100); // Short delay
+
     esp_deep_sleep_start();
 }
 
@@ -889,6 +905,11 @@ void setup() {
         esp_sleep_enable_ext0_wakeup(GPIO_NUM_36, 0);
         setState(STATE_SLEEPING);
         delay(1000);
+
+        logEvent("Putting SD card to sleep before error sleep.");
+        display.sdCardSleep();
+        delay(100); // Short delay
+
         esp_deep_sleep_start();
         return;
     }
@@ -937,6 +958,11 @@ void setup() {
         logEvent("No WiFi credentials; sleeping for 5 minutes");
         esp_sleep_enable_timer_wakeup(300 * 1000000ULL); // 5 minutes
         esp_sleep_enable_ext0_wakeup(GPIO_NUM_36, 0);
+
+        logEvent("Putting SD card to sleep before error sleep.");
+        display.sdCardSleep();
+        delay(100); // Short delay
+
         esp_deep_sleep_start();
         return;
     }
@@ -990,6 +1016,11 @@ void setup() {
         esp_sleep_enable_ext0_wakeup(GPIO_NUM_36, 0);
         setState(STATE_SLEEPING);
         delay(1000);
+
+        logEvent("Putting SD card to sleep before error sleep.");
+        display.sdCardSleep();
+        delay(100); // Short delay
+
         esp_deep_sleep_start();
     }
 }
