@@ -25,7 +25,7 @@ Inkplate display;
 Preferences preferences;
 
 // OTA configuration
-const char* currentFirmwareVersion = "1.6";  // Current firmware version
+const char* currentFirmwareVersion = "1.7";  // Current firmware version
 const char* versionCheckURL = "https://s3.us-west-1.amazonaws.com/fridge-thing/firmware/version.txt";
 const char* firmwareURL = "https://s3.us-west-1.amazonaws.com/fridge-thing/firmware/inkplate-6color.ino.bin";
 
@@ -501,22 +501,23 @@ bool downloadToSD(const String &imageUrl, const String &localPath, WiFiClient &c
 }
 
 /**
- * Fetch a BMP image from the server, save it to SD, render it, and then schedule deep sleep.
+ * Fetch metadata (including image URL or NO_REFRESH) from the server,
+ * save image to SD if URL provided, render it, and then schedule deep sleep.
  * Battery information is included in the server request.
  * Time information is received from the server and used to update the RTC.
  */
 void fetchAndDisplayImage() {
     setState(STATE_FETCHING_IMAGE);
-    
+
     if (!checkAndReconnectWifi()) {
         setState(STATE_ERROR, ERROR_WIFI_CONNECT);
         Serial.println("ERROR: Not connected to Wi-Fi");
         logEvent("ERROR: Not connected to Wi-Fi");
-        delay(5000);
+        delay(5000); // Keep delay before restart
         ESP.restart();
-        return;
+        // return; // Technically unreachable after restart
     }
-    
+
     // Generate a unique device ID from the ESP32 MAC address.
     uint64_t chipid = ESP.getEfuseMac();
     char deviceId[17];
@@ -524,39 +525,63 @@ void fetchAndDisplayImage() {
     String deviceUuid = String(deviceId);
     Serial.println("Device UUID: " + deviceUuid);
     logEvent(("Device UUID: " + deviceUuid).c_str());
-    
+
     // Prepare the server URL.
     String serverUrl = "https://fridge-thing-production.up.railway.app/api/devices/" + deviceUuid + "/display";
-    WiFiClientSecure client;
-    client.setInsecure();
-    
+    WiFiClientSecure client; // Use secure client for the API call
+    client.setInsecure();    // Allow connection without certificate check if needed
+
     // POST request with firmware version and battery info.
     HTTPClient http;
-    http.setTimeout(10000);
-    http.begin(client, serverUrl);
+    http.setTimeout(10000); // 10 second timeout for API request
+    if (!http.begin(client, serverUrl)) {
+        Serial.println("ERROR: http.begin() failed for API request");
+        logEvent("ERROR: http.begin() failed for API request");
+        setState(STATE_ERROR, ERROR_SERVER_CONNECT);
+        delay(5000);
+        // Schedule a retry after 1 minute.
+        esp_sleep_enable_timer_wakeup(60 * 1000000ULL);
+        esp_sleep_enable_ext0_wakeup(GPIO_NUM_36, 0);
+        setState(STATE_SLEEPING);
+        // Disable WiFi to save battery before deep sleep.
+        WiFi.disconnect();
+        WiFi.mode(WIFI_OFF);
+        esp_wifi_stop();
+        delay(1000);
+        logEvent("Putting SD card to sleep due to error.");
+        display.sdCardSleep();
+        delay(100); // Short delay
+        esp_deep_sleep_start();
+        return; // Should not be reached
+    }
     http.addHeader("Content-Type", "application/json");
-    
+
     StaticJsonDocument<256> doc;
     doc["current_fw_ver"] = currentFirmwareVersion;
     double voltage = display.readBattery();
     float batteryPercent = voltageToPercent(voltage);
     doc["battery_pct"] = batteryPercent;
     doc["battery_voltage"] = voltage;
-    
-    // DEBUGGING: Always request time sync for testing
+
+    // Always request time sync for now (as per original code)
     doc["request_time_sync"] = true;
-    
     Serial.println("Sending request with request_time_sync=true");
     logEvent("Sending request with request_time_sync=true");
-    
+
+
     String body;
     serializeJson(doc, body);
     Serial.println("Request body: " + body);
     logEvent(("Request body: " + body).c_str());
-    
+
     int httpCode = http.POST(body);
     if (httpCode != 200) {
         String errMsg = "ERROR: POST code=" + String(httpCode);
+        // Try to get response body for more details if available
+        String responseBody = http.getString();
+        if (responseBody.length() > 0) {
+            errMsg += ", Response: " + responseBody;
+        }
         Serial.println(errMsg);
         logEvent(errMsg.c_str());
         http.end();
@@ -566,69 +591,29 @@ void fetchAndDisplayImage() {
         esp_sleep_enable_timer_wakeup(60 * 1000000ULL);
         esp_sleep_enable_ext0_wakeup(GPIO_NUM_36, 0);
         setState(STATE_SLEEPING);
-
         // Disable WiFi to save battery before deep sleep.
         WiFi.disconnect();
         WiFi.mode(WIFI_OFF);
         esp_wifi_stop();
         delay(1000);
-
         logEvent("Putting SD card to sleep due to error.");
         display.sdCardSleep();
-        delay(100); // Short delay to ensure command takes effect
-
+        delay(100); // Short delay
         esp_deep_sleep_start();
-        return;
+        return; // Should not be reached
     }
-    
+
     String resp = http.getString();
     Serial.println("Server response: " + resp);
     logEvent(("Server response: " + resp).c_str());
-    
-    StaticJsonDocument<768> respDoc;  // Increased size to accommodate time info
+
+    StaticJsonDocument<768> respDoc; // Increased size to accommodate time info
     DeserializationError err = deserializeJson(respDoc, resp);
-    http.end();
+    http.end(); // End HTTP connection *after* getting the string
     if (err) {
         Serial.println("ERROR: JSON parse failed");
         logEvent("ERROR: JSON parse failed");
         setState(STATE_ERROR, ERROR_SERVER_CONNECT);
-        delay(5000);
-        ESP.restart();
-        return;
-    }
-    
-    // Check if the server provided time information and update RTC if available
-    if (respDoc.containsKey("time")) {
-        JsonObject timeObj = respDoc["time"].as<JsonObject>();
-        
-        // Debug log the time object
-        String timeDebug = "Time object received: ";
-        serializeJson(timeObj, timeDebug);
-        Serial.println(timeDebug);
-        logEvent(timeDebug.c_str());
-        
-        if (syncRTCFromServerData(timeObj)) {
-            logEvent("RTC synchronized with server time");
-        } else {
-            logEvent("Server provided invalid time information");
-        }
-    } else {
-        Serial.println("WARNING: No time object in server response");
-        logEvent("WARNING: No time object in server response");
-    }
-    
-    String imageUrl = respDoc["image_url"].as<String>();
-    long nextWakeSec = respDoc["next_wake_secs"].as<long>();
-    if (imageUrl.startsWith("http://")) {
-        imageUrl.replace("http://", "https://");
-    }
-    
-    // Download the image.
-    const String localPath = "/temp.bmp";
-    if (!downloadToSD(imageUrl, localPath, client)) {
-        Serial.println("ERROR: Could not download image");
-        logEvent("ERROR: Could not download image");
-        setState(STATE_ERROR, ERROR_IMAGE_DOWNLOAD);
         delay(5000);
         // Schedule a retry after 1 minute.
         esp_sleep_enable_timer_wakeup(60 * 1000000ULL);
@@ -639,51 +624,166 @@ void fetchAndDisplayImage() {
         WiFi.mode(WIFI_OFF);
         esp_wifi_stop();
         delay(1000);
-
         logEvent("Putting SD card to sleep due to error.");
         display.sdCardSleep();
         delay(100); // Short delay
-
         esp_deep_sleep_start();
-        return;
+        return; // Should not be reached
     }
-    
-    setState(STATE_DISPLAYING_IMAGE);
-    Serial.println("Rendering image...");
-    logEvent("Rendering image...");
-    bool ok = display.drawImage(localPath.c_str(), 0, 0);
-    if (!ok) {
-        Serial.println("ERROR: drawImage failed");
-        logEvent("ERROR: drawImage failed");
-        setState(STATE_ERROR, ERROR_IMAGE_DOWNLOAD);
+
+    // Check if the server provided time information and update RTC if available
+    if (respDoc.containsKey("time")) {
+        JsonObject timeObj = respDoc["time"].as<JsonObject>();
+
+        // Debug log the time object
+        String timeDebug = "Time object received: ";
+        serializeJson(timeObj, timeDebug);
+        Serial.println(timeDebug);
+        // logEvent(timeDebug.c_str()); // Optional: Might be too verbose for regular logs
+
+        if (syncRTCFromServerData(timeObj)) {
+            logEvent("RTC synchronized with server time");
+        } else {
+            logEvent("Server provided invalid time information");
+        }
+    } else {
+        Serial.println("WARNING: No time object in server response");
+        logEvent("WARNING: No time object in server response");
+    }
+
+    // --- Check for NO_REFRESH before attempting download ---
+    String imageUrl = respDoc["image_url"].as<String>();
+    long nextWakeSec = respDoc["next_wake_secs"].as<long>();
+
+    if (imageUrl == "NO_REFRESH") {
+        Serial.println("Server indicated NO_REFRESH. Skipping image download and display.");
+        logEvent("Server indicated NO_REFRESH. Skipping image download and display.");
+        // No image processing needed, proceed directly to sleep scheduling
+    }
+    else if (imageUrl.length() > 0 && (imageUrl.startsWith("http://") || imageUrl.startsWith("https://")))
+    {
+        // We have a valid-looking URL, attempt download and display
+        if (imageUrl.startsWith("http://")) {
+             // Attempt to force HTTPS if server gave HTTP (common on S3 etc)
+             imageUrl.replace("http://", "https://");
+             Serial.println("Changed image URL to HTTPS: " + imageUrl);
+             logEvent(("Changed image URL to HTTPS: " + imageUrl).c_str());
+        }
+
+        const String localPath = "/temp.bmp";
+        // Use a new WiFiClientSecure instance specifically for the image download
+        WiFiClientSecure imageClient;
+        imageClient.setInsecure(); // Allow insecure connection for image download if needed
+
+        if (!downloadToSD(imageUrl, localPath, imageClient)) { // Pass the imageClient
+            Serial.println("ERROR: Could not download image");
+            logEvent("ERROR: Could not download image");
+            setState(STATE_ERROR, ERROR_IMAGE_DOWNLOAD);
+            delay(5000);
+            // Schedule a retry after 1 minute.
+            esp_sleep_enable_timer_wakeup(60 * 1000000ULL);
+            esp_sleep_enable_ext0_wakeup(GPIO_NUM_36, 0);
+            setState(STATE_SLEEPING);
+            // Disable WiFi to save battery before deep sleep.
+            WiFi.disconnect();
+            WiFi.mode(WIFI_OFF);
+            esp_wifi_stop();
+            delay(1000);
+            logEvent("Putting SD card to sleep due to error.");
+            display.sdCardSleep();
+            delay(100); // Short delay
+            esp_deep_sleep_start();
+            return; // Should not be reached
+        }
+
+        setState(STATE_DISPLAYING_IMAGE);
+        Serial.println("Rendering image...");
+        logEvent("Rendering image...");
+        bool ok = display.drawImage(localPath.c_str(), 0, 0);
+        if (!ok) {
+            Serial.println("ERROR: drawImage failed");
+            logEvent("ERROR: drawImage failed");
+            setState(STATE_ERROR, ERROR_IMAGE_DOWNLOAD); // Could be SD card issue or bad BMP
+            delay(5000);
+            // Schedule a retry after 1 minute.
+            esp_sleep_enable_timer_wakeup(60 * 1000000ULL);
+            esp_sleep_enable_ext0_wakeup(GPIO_NUM_36, 0);
+            setState(STATE_SLEEPING);
+            // Disable WiFi to save battery before deep sleep.
+            WiFi.disconnect();
+            WiFi.mode(WIFI_OFF);
+            esp_wifi_stop();
+            delay(1000);
+            logEvent("Putting SD card to sleep due to error.");
+            display.sdCardSleep();
+            delay(100); // Short delay
+            esp_deep_sleep_start();
+            return; // Should not be reached
+        }
+
+        // Refresh the physical display only if drawImage was successful
+        display.display();
+        Serial.println("Image displayed successfully.");
+        logEvent("Image displayed successfully.");
+
+    } else {
+        // The image URL was not "NO_REFRESH" but also not a valid http/https URL
+        Serial.println("ERROR: Received invalid image URL format: " + imageUrl);
+        logEvent(("ERROR: Received invalid image URL format: " + imageUrl).c_str());
+        setState(STATE_ERROR, ERROR_SERVER_CONNECT); // Treat as a server error
         delay(5000);
-        ESP.restart();
-        return;
+         // Schedule a retry after 1 minute.
+        esp_sleep_enable_timer_wakeup(60 * 1000000ULL);
+        esp_sleep_enable_ext0_wakeup(GPIO_NUM_36, 0);
+        setState(STATE_SLEEPING);
+        // Disable WiFi to save battery before deep sleep.
+        WiFi.disconnect();
+        WiFi.mode(WIFI_OFF);
+        esp_wifi_stop();
+        delay(1000);
+        logEvent("Putting SD card to sleep due to error.");
+        display.sdCardSleep();
+        delay(100); // Short delay
+        esp_deep_sleep_start();
+        return; // Should not be reached
     }
-    
-    // At this point, the image is fully rendered and remains on screen.
-    display.display();
-    
+
+    // --- Sleep Scheduling (runs for both NO_REFRESH and successful display) ---
+
+    // Ensure a minimum sleep time to prevent rapid wake-ups if server gives bad data
+    if (nextWakeSec < 60) { // Minimum 1 minute sleep
+       Serial.println("WARN: nextWakeSec < 60, setting to 60.");
+       logEvent("WARN: nextWakeSec < 60, setting to 60.");
+       nextWakeSec = 60;
+    }
+     if (nextWakeSec > 86400) { // Maximum 24 hour sleep
+       Serial.println("WARN: nextWakeSec > 86400, setting to 86400.");
+       logEvent("WARN: nextWakeSec > 86400, setting to 86400.");
+       nextWakeSec = 86400;
+    }
+
     String sleepMsg = "Sleeping for " + String(nextWakeSec) + " seconds...";
     Serial.println(sleepMsg);
     logEvent(sleepMsg.c_str());
-    
+
     // Store next wake-up info persistently.
     preferences.begin("sleep", false);
     preferences.putLong("nextWake", nextWakeSec);
     preferences.end();
-    
+
     // Enable timer wakeup for the next scheduled update.
     esp_sleep_enable_timer_wakeup(nextWakeSec * 1000000ULL);
     // Enable external wakeup on GPIO36 (wake-up button).
     esp_sleep_enable_ext0_wakeup(GPIO_NUM_36, 0);
-    
+
+    setState(STATE_SLEEPING); // Set state *before* actually sleeping
     logEvent("Entering sleep mode.");
+
     // Disable WiFi to save battery before deep sleep.
-    WiFi.disconnect();
+    WiFi.disconnect(true); // Disconnect and erase config in RAM
     WiFi.mode(WIFI_OFF);
-    esp_wifi_stop();
-    delay(1000);
+    esp_wifi_stop();        // Ensure WiFi radio is powered down
+    delay(1000);            // Allow time for WiFi to shut down cleanly
 
     logEvent("Putting SD card to sleep.");
     display.sdCardSleep();

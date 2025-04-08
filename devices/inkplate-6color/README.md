@@ -31,7 +31,7 @@ a. Create a new text file named `version.txt`.
 b. Inside `version.txt`, enter the updated version number that matches the firmware.
 
 ### 5. Upload Files to S3
-a. Upload both `inkplate-6color.ino.bin` and `version.txt` to the designated S3 bucket.
+a. In the designated S3 bucket, remove the existing `inkplate-6color.ino.bin` and `version.txt` files, and replace them with your updated files.
 
 ### 6. (If Device Available) Trigger the Update on the Device
 a. Press the **Wake** button on the Inkplate 6 Color to initiate a new wake-up and update process.
