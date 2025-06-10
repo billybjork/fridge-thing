@@ -11,9 +11,11 @@
 #include <HTTPUpdate.h>
 #include <esp_wifi.h>
 
+// ──────────────────────────────────────────────────────────────
 // Forward declarations
 bool readWiFiCredentialsFromSD(String &ssid, String &password);
 void initializeRTC();
+void configureWiFiPowerSave();
 
 // RTC_DATA_ATTR makes this variable persist across deep sleep cycles
 RTC_DATA_ATTR int bootCount = 0;
@@ -25,7 +27,7 @@ Inkplate display;
 Preferences preferences;
 
 // OTA configuration
-const char* currentFirmwareVersion = "1.7";  // Current firmware version
+const char* currentFirmwareVersion = "1.8";
 const char* versionCheckURL = "https://s3.us-west-1.amazonaws.com/fridge-thing/firmware/version.txt";
 const char* firmwareURL = "https://s3.us-west-1.amazonaws.com/fridge-thing/firmware/inkplate-6color.ino.bin";
 
@@ -63,6 +65,17 @@ unsigned long lastWifiCheckTime = 0;
 // Battery thresholds
 #define BATTERY_LOW_PCT        10.0f     // 10% battery is low
 #define BATTERY_CRITICAL_PCT   5.0f      // 5% battery is critical
+
+/**
+ * Helper function: tweak Wi-Fi radio for minimum power while connected.
+ *   • caps TX at 10 dBm (approx. 10 mW)
+ *   • enables ESP32 modem-sleep between AP beacons
+ * Safe on any modern AP ≤ 20 m distance.
+ */
+void configureWiFiPowerSave() {
+    esp_wifi_set_ps(WIFI_PS_MIN_MODEM);   // nap between DTIM beacons
+    WiFi.setTxPower(WIFI_POWER_11dBm);    // limit TX power (≈12 mW)
+}
 
 /**
  * Helper function: Convert voltage (3.2V–4.2V) to approximate battery percentage.
@@ -271,6 +284,10 @@ bool checkAndReconnectWifi() {
     Serial.println("Wi-Fi reconnected successfully!");
     logEvent("Wi-Fi reconnected successfully.");
     wifiReconnectAttempts = 0;
+
+    // ── NEW: enable low-power mode once connected ──
+    configureWiFiPowerSave();
+
     return true;
 }
 
@@ -1087,6 +1104,8 @@ void setup() {
         logEvent("Wi-Fi connected successfully");
         Serial.print("Connected to WiFi. IP: ");
         Serial.println(WiFi.localIP());
+
+        configureWiFiPowerSave();
         
         // Check for OTA updates
         checkOTAUpdate();
